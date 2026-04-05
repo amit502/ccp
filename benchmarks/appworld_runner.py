@@ -32,7 +32,8 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 
 APPWORLD_ROOT = os.environ.get("APPWORLD_ROOT", "")
-APPWORLD_URL  = os.environ.get("APPWORLD_URL", "http://localhost:8000")
+APPWORLD_URL  = os.environ.get("APPWORLD_URL",  "http://localhost:8000")  # serve apis
+APPWORLD_ENV_URL = os.environ.get("APPWORLD_ENV_URL", "http://localhost:8002")  # serve environment
 
 
 # ---------------------------------------------------------------------------
@@ -110,75 +111,49 @@ def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[
 
 def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
     """
-    Seed the AppWorld API server with task-specific databases before running agent.
-
-    AppWorld serve-apis loads BASE databases on startup. Each task has its own
-    SQLite databases at data/tasks/{task_id}/dbs/ that must be loaded before
-    the agent calls any app APIs.
-
-    Returns True if seeding succeeded, False otherwise.
+    Initialise a task on the AppWorld environment server (serve environment, port 8002).
+    This sets up the task-specific databases and state via /initialize,
+    which is more reliable than manually calling /dbs on the APIs server.
     """
-    task_dbs_path = str(Path(appworld_root) / "data" / "tasks" / task.id / "dbs")
-
-    # Load task-specific databases into memory
+    from .appworld_runner import APPWORLD_ENV_URL
     try:
         r = requests.post(
-            f"{appworld_url}/dbs",
+            f"{APPWORLD_ENV_URL}/initialize",
             json={
-                "from_db_home_path": task_dbs_path,
-                "to_db_home_path":   f":memory:task_input-{task.id}",
-                "create": False,
+                "task_id":         task.id,
+                "remote_apis_url": appworld_url,   # serve apis URL
             },
-            timeout=30,
+            timeout=60,
         )
         if r.status_code not in (200, 201):
-            print(f"  [AppWorld] /dbs seed failed ({r.status_code}): {r.text[:100]}")
+            print(f"  [AppWorld] /initialize failed ({r.status_code}): {r.text[:100]}")
             return False
+        return True
     except Exception as e:
-        print(f"  [AppWorld] /dbs seed error: {e}")
+        print(f"  [AppWorld] /initialize error: {e}")
         return False
-
-    # Set task datetime from specs.json (non-fatal if missing)
-    task_datetime = getattr(task, "data", {}).get("datetime")
-    if task_datetime:
-        try:
-            requests.post(
-                f"{appworld_url}/date_time",
-                json={"date_and_time": task_datetime},
-                timeout=10,
-            )
-        except Exception:
-            pass
-
-    return True
 
 
 def _reset_task(task_id: str, appworld_url: str) -> None:
-    """Clear task-specific databases from server memory after task completes."""
-    try:
-        requests.delete(
-            f"{appworld_url}/dbs/cache",
-            json={"task_id": task_id},
-            timeout=10,
-        )
-    except Exception:
-        pass
+    """No-op — environment server manages its own state between tasks."""
+    pass
 
 
 def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
-    """Call AppWorld environment server to evaluate the task."""
+    """Evaluate via serve environment server (port 8002) /evaluate endpoint."""
     try:
         r = requests.post(
-            f"{APPWORLD_URL}/evaluate",
-            json={"task_id": task_id},
+            f"{APPWORLD_ENV_URL}/evaluate",
+            json={"task_id": task_id, "suppress_errors": True},
             timeout=30,
         )
         if r.status_code == 200:
-            result = r.json()
-            return float(result.get("score", 0.0))
-    except Exception:
-        pass
-    # Fallback: use agent's done flag
+            data = r.json()
+            # AppWorld returns a TestTracker dict — get overall score
+            score = data.get("score", data.get("success_rate", 0.0))
+            return float(score)
+    except Exception as e:
+        print(f"  [AppWorld] /evaluate error: {e}")
     return 1.0 if final_state.get("done") else 0.0
 
 
