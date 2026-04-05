@@ -98,10 +98,10 @@ def save_results(rows: List[Dict], filename: str) -> Path:
 # Runner construction — graceful: warns and returns None if unavailable
 # ---------------------------------------------------------------------------
 
-def _make_appworld_runner(max_tasks: int, max_steps: int):
+def _make_appworld_runner(max_tasks: int, max_steps: int, split: str = "test"):
     try:
         from ..benchmarks.mcp_runner import AppWorldMCPRunner
-        return AppWorldMCPRunner(max_tasks=max_tasks, max_steps=max_steps)
+        return AppWorldMCPRunner(max_tasks=max_tasks, max_steps=max_steps, split=split)
     except Exception as e:
         print(f"[WARN] AppWorld unavailable: {e}")
         print("       Run: appworld download all && appworld server start")
@@ -358,13 +358,13 @@ def run_ablation_online(max_tasks: int, verbose: bool):
 
 def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: bool):
     """
-    Run ACON's offline optimization pipeline.
-    Saves optimized guidelines to RESULTS_PATH/acon_guidelines/<benchmark>.json.
-    Run this once before the main comparison for best ACON numbers.
+    Run ACON offline optimization on the TRAIN split.
+    Saves guidelines to RESULTS_PATH/acon_guidelines/<benchmark>.json.
+    Main evaluation uses TEST split — correct separation.
     """
     import asyncio
     from ..baselines.acon import (
-        ACONContextManager, ACONOfflineOptimizer, GUIDELINES_PATH, save_guidelines,
+        ACONContextManager, ACONOfflineOptimizer, save_guidelines,
     )
     from ..benchmarks.mcp_runner import _run_one_task
 
@@ -373,17 +373,12 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
     acon_module.GUIDELINES_PATH = RESULTS_DIR / "acon_guidelines"
     acon_module.GUIDELINES_PATH.mkdir(parents=True, exist_ok=True)
 
-    runner_map = {
-        "appworld":   _make_appworld_runner,
-        "multiqa":    _make_multiqa_runner,
-        "officebench": _make_officebench_runner,
-    }
-    make_runner = runner_map.get(benchmark.lower(), _make_appworld_runner)
-    runner = make_runner(max_tasks=max_tasks, max_steps=30)
-    if runner is None:
+    # Use TRAIN split — keeps test split unseen during optimization
+    train_runner = _make_appworld_runner(max_tasks=max_tasks, max_steps=30, split="train")
+    if train_runner is None:
         return
 
-    tasks = runner._tasks
+    tasks = train_runner._tasks
 
     optimizer = ACONOfflineOptimizer(
         benchmark=benchmark,
@@ -393,8 +388,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
 
     def task_runner(task, manager):
         """Run one task through real MCP for trajectory collection."""
-        configs = (runner._server_configs() if hasattr(runner, "_server_configs")
-                   else runner._server_configs(getattr(task, "app", "word")))
+        configs = train_runner._server_configs()
         result = asyncio.run(_run_one_task(
             task_id=task.id,
             goal=task.goal,

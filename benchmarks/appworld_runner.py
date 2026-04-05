@@ -107,6 +107,64 @@ def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[
 # Evaluation via REST
 # ---------------------------------------------------------------------------
 
+
+def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
+    """
+    Seed the AppWorld API server with task-specific databases before running agent.
+
+    AppWorld serve-apis loads BASE databases on startup. Each task has its own
+    SQLite databases at data/tasks/{task_id}/dbs/ that must be loaded before
+    the agent calls any app APIs.
+
+    Returns True if seeding succeeded, False otherwise.
+    """
+    task_dbs_path = str(Path(appworld_root) / "data" / "tasks" / task.id / "dbs")
+
+    # Load task-specific databases into memory
+    try:
+        r = requests.post(
+            f"{appworld_url}/dbs",
+            json={
+                "from_db_home_path": task_dbs_path,
+                "to_db_home_path":   f":memory:task_input-{task.id}",
+                "create": False,
+            },
+            timeout=30,
+        )
+        if r.status_code not in (200, 201):
+            print(f"  [AppWorld] /dbs seed failed ({r.status_code}): {r.text[:100]}")
+            return False
+    except Exception as e:
+        print(f"  [AppWorld] /dbs seed error: {e}")
+        return False
+
+    # Set task datetime from specs.json (non-fatal if missing)
+    task_datetime = getattr(task, "data", {}).get("datetime")
+    if task_datetime:
+        try:
+            requests.post(
+                f"{appworld_url}/date_time",
+                json={"date_and_time": task_datetime},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    return True
+
+
+def _reset_task(task_id: str, appworld_url: str) -> None:
+    """Clear task-specific databases from server memory after task completes."""
+    try:
+        requests.delete(
+            f"{appworld_url}/dbs/cache",
+            json={"task_id": task_id},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
     """Call AppWorld environment server to evaluate the task."""
     try:

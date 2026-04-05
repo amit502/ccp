@@ -29,7 +29,7 @@ from ..baselines.acon import (
     load_guidelines,
     optimize_guidelines_one_iter,
 )
-from ..mcp_server import AppWorldMCPServer, _mock_response
+from ..mcp_server import AppWorldMCPServer, ALL_APPS
 from ..benchmarks.officebench_runner import OfficeBenchRunner, _score_officebench_task
 from ..benchmarks.multiobjqa_runner import (
     MultiObjQARunner,
@@ -229,61 +229,78 @@ class TestACONContextManager(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestMCPServer(unittest.TestCase):
+    """Tests for the dynamic AppWorld MCP server.
+    Tool discovery requires a running AppWorld server — these tests
+    verify server initialisation and the ALL_APPS registry only."""
 
-    def test_app_apis_populated(self):
-        """Server has API definitions for expected AppWorld apps."""
-        for app in ["amazon", "gmail", "venmo", "spotify", "contacts"]:
-            self.assertIn(app, AppWorldMCPServer.APP_APIS)
-            self.assertGreater(len(AppWorldMCPServer.APP_APIS[app]), 0)
+    def test_all_apps_list_has_expected_apps(self):
+        """ALL_APPS contains all expected AppWorld application names."""
+        for app in ["amazon", "gmail", "venmo", "spotify", "phone",
+                    "file_system", "splitwise", "simple_note", "todoist"]:
+            self.assertIn(app, ALL_APPS)
 
-    def test_tool_schema_naming_convention(self):
-        """Tool names follow {app}__{method} convention."""
-        server = AppWorldMCPServer(apps=["amazon"])
-        # Build schemas synchronously for testing
-        schemas = []
-        for api in AppWorldMCPServer.APP_APIS["amazon"]:
-            schema = server._build_tool_schema("amazon", api)
-            schemas.append(schema)
-            self.assertTrue(schema.name.startswith("amazon__"),
-                            f"Tool name '{schema.name}' doesn't follow convention")
+    def test_all_apps_count(self):
+        """ALL_APPS has at least 10 entries covering all AppWorld apps."""
+        self.assertGreaterEqual(len(ALL_APPS), 10)
 
-    def test_tool_schema_has_input_schema(self):
-        """Every tool schema has a valid JSON Schema inputSchema."""
-        server = AppWorldMCPServer(apps=["gmail"])
-        for api in AppWorldMCPServer.APP_APIS["gmail"]:
-            schema = server._build_tool_schema("gmail", api)
-            self.assertIn("type", schema.inputSchema)
-            self.assertIn("properties", schema.inputSchema)
-            self.assertEqual(schema.inputSchema["type"], "object")
+    def test_server_init_no_connection_required(self):
+        """AppWorldMCPServer initialises without connecting to AppWorld server."""
+        server = AppWorldMCPServer(
+            appworld_url="http://localhost:9999",  # not running
+            apps=["amazon"]
+        )
+        self.assertIsNotNone(server.server)
+        self.assertEqual(server.apps, ["amazon"])
+        self.assertEqual(server._tools, [])  # lazy-loaded at first list_tools call
 
-    def test_mock_response_authenticate(self):
-        """Mock authenticate returns token and user_id."""
-        resp = _mock_response("amazon", "authenticate", {})
-        self.assertIn("token", resp)
-        self.assertIn("user_id", resp)
-        self.assertIn("amazon", resp["token"])
+    def test_server_url_stored(self):
+        """Server stores the AppWorld base URL correctly."""
+        server = AppWorldMCPServer(
+            appworld_url="http://myserver:8000",
+            apps=["gmail"]
+        )
+        self.assertEqual(server.appworld_url, "http://myserver:8000")
 
-    def test_mock_response_list_returns_list(self):
-        """Mock list_* methods return a list."""
-        resp = _mock_response("amazon", "list_orders", {})
-        self.assertIsInstance(resp, list)
+    def test_tool_name_convention_in_fetch(self):
+        """_fetch_app_tools produces tool names following {app}__{op_id}."""
+        from unittest.mock import patch
+        fake_spec = {
+            "paths": {
+                "/search": {
+                    "post": {
+                        "operationId": "search_products",
+                        "summary": "Search products",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"query": {"type": "string"}},
+                                        "required": ["query"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {"schemas": {}}
+        }
+        from ccp.mcp_server import _fetch_app_tools
+        import requests
+        with patch.object(requests, "get") as mock_get:
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.json.return_value = fake_spec
+            tools = _fetch_app_tools("amazon", "http://localhost:8000")
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["name"], "amazon__search_products")
+        self.assertTrue(tools[0]["name"].startswith("amazon__"))
 
-    def test_mock_response_send_returns_status(self):
-        """Mock send_* methods return a status."""
-        resp = _mock_response("gmail", "send_email", {})
-        self.assertIn("status", resp)
-
-    def test_all_six_apps_registered(self):
-        """Server registers all 6 expected apps."""
-        expected = {"amazon", "gmail", "venmo", "spotify", "contacts", "phone"}
-        actual   = set(AppWorldMCPServer.APP_APIS.keys())
-        self.assertTrue(expected.issubset(actual))
-
-    def test_tool_count(self):
-        """Server exposes at least 25 tools across all apps (457 in real AppWorld)."""
-        server = AppWorldMCPServer()
-        total  = sum(len(apis) for apis in AppWorldMCPServer.APP_APIS.values())
-        self.assertGreater(total, 25)
+    def test_fetch_returns_empty_on_server_down(self):
+        """_fetch_app_tools returns empty list when server is unreachable."""
+        from ccp.mcp_server import _fetch_app_tools
+        tools = _fetch_app_tools("amazon", "http://localhost:19999")
+        self.assertEqual(tools, [])
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ import asyncio
 import json
 import os
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager  # kept for potential future use
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -177,51 +177,46 @@ def _route(state: MCPAgentState) -> str:
 # Main entry point — accepts ANY context manager
 # ---------------------------------------------------------------------------
 
-@asynccontextmanager
 async def build_mcp_agent(
     goal:            str,
-    manager:         Any,           # CCPContextManager | FIFOManager | ACON | …
+    manager:         Any,
     server_configs:  Dict[str, Any],
     max_steps:       int = 40,
-):
+) -> tuple:
     """
-    Build and yield a compiled LangGraph agent connected to real MCP servers,
-    with the provided context manager wired as a GenericToolCallInterceptor.
-
-    Usage:
-        async with build_mcp_agent(goal, manager, server_configs) as (graph, state):
-            final = await graph.ainvoke(state)
+    Build a compiled LangGraph agent connected to real MCP servers.
+    Uses langchain-mcp-adapters>=0.1.0 API (no async with context manager).
+    Each tool call starts its own MCP session automatically.
     """
     manager.set_goal(goal)
     interceptor = GenericToolCallInterceptor(manager=manager)
 
-    async with MultiServerMCPClient(
+    client = MultiServerMCPClient(
         connections=server_configs,
         tool_interceptors=[interceptor],
-    ) as mcp_client:
+    )
+    tools = await client.get_tools()
 
-        tools = mcp_client.get_tools()
+    graph = StateGraph(MCPAgentState)
 
-        graph = StateGraph(MCPAgentState)
+    async def agent_node(state):
+        return await _agent_node(state, tools)
 
-        async def agent_node(state):
-            return await _agent_node(state, tools)
+    graph.add_node("agent", agent_node)
+    graph.add_node("tools", ToolNode(tools))
+    graph.set_entry_point("agent")
+    graph.add_conditional_edges("agent", _route, {"tools": "tools", "end": END})
+    graph.add_edge("tools", "agent")
 
-        graph.add_node("agent", agent_node)
-        graph.add_node("tools", ToolNode(tools))
-        graph.set_entry_point("agent")
-        graph.add_conditional_edges("agent", _route, {"tools": "tools", "end": END})
-        graph.add_edge("tools", "agent")
+    compiled = graph.compile()
 
-        compiled = graph.compile()
+    initial_state: MCPAgentState = {
+        "messages":     [],
+        "goal":         goal,
+        "step":         0,
+        "max_steps":    max_steps,
+        "done":         False,
+        "final_answer": None,
+    }
 
-        initial_state: MCPAgentState = {
-            "messages":     [],
-            "goal":         goal,
-            "step":         0,
-            "max_steps":    max_steps,
-            "done":         False,
-            "final_answer": None,
-        }
-
-        yield compiled, initial_state
+    return compiled, initial_state

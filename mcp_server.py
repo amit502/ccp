@@ -3,20 +3,17 @@ mcp_server.py
 
 Real MCP server wrapping AppWorld's 457 APIs.
 
-This file implements a proper MCP server using the official `mcp` Python SDK.
-Each AppWorld app (Gmail, Amazon, Venmo, Spotify, etc.) is exposed as a set
-of MCP tools following the Model Context Protocol specification.
+Discovers all APIs dynamically from the AppWorld REST server's OpenAPI spec
+at startup — no hardcoding, no appworld Python import needed.
 
-Run this as a subprocess (stdio transport):
-    python -m ccp.mcp_server --app gmail
-    python -m ccp.mcp_server --app all
+Each app is mounted at /{app_name}/ on the AppWorld server.
+OpenAPI spec: GET http://localhost:8000/{app_name}/openapi.json
 
-In the full deployment, one server process per app is started, matching
-Figure 1 of the proposal: "MCP Servers (457 APIs)".
+Tool naming: {app_name}__{operation_id}
+Tool call:   POST http://localhost:8000/{app_name}/{path} with JSON body
 
-The CCP module intercepts tool responses at the MCP boundary — specifically
-via langchain-mcp-adapters' ToolCallInterceptor — BEFORE they enter the
-agent's context window.
+Run as subprocess:
+    python -m ccp.mcp_server --appworld-url http://localhost:8000
 """
 
 from __future__ import annotations
@@ -26,198 +23,210 @@ import asyncio
 import json
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-# MCP SDK — official Python implementation
+import requests
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types as mcp_types
 
+APPWORLD_URL = os.environ.get("APPWORLD_URL", "http://localhost:8000")
+
+# All AppWorld app names (from APP_TO_DESCRIPTION in appworld source)
+ALL_APPS = [
+    "admin", "api_docs", "supervisor",
+    "amazon", "phone", "file_system", "spotify",
+    "venmo", "gmail", "splitwise", "simple_note", "todoist",
+]
+
+
 # ---------------------------------------------------------------------------
-# AppWorld client (requires `appworld server start` to be running)
+# Dynamic API discovery from OpenAPI spec
 # ---------------------------------------------------------------------------
 
-try:
-    from appworld.client.api import AppWorldClient
-    APPWORLD_AVAILABLE = True
-except ImportError:
-    APPWORLD_AVAILABLE = False
+def _fetch_app_tools(app: str, base_url: str) -> List[Dict]:
+    """
+    Fetch OpenAPI spec for one app and convert to tool definitions.
+    Returns list of {name, description, path, method, properties, required}.
+    """
+    try:
+        r = requests.get(f"{base_url}/{app}/openapi.json", timeout=5)
+        if r.status_code != 200:
+            return []
+        spec = r.json()
+    except Exception:
+        return []
 
-APPWORLD_BASE_URL = os.environ.get("APPWORLD_BASE_URL", "http://localhost:8000")
+    tools = []
+    paths = spec.get("paths", {})
+    schemas = spec.get("components", {}).get("schemas", {})
 
+    for path, path_item in paths.items():
+        for http_method, operation in path_item.items():
+            if http_method not in ("get", "post", "put", "delete", "patch"):
+                continue
+            if operation.get("summary", "").startswith("meta:"):
+                continue  # skip internal AppWorld meta-endpoints
+
+            op_id = operation.get("operationId", "")
+            if not op_id:
+                # Derive from path
+                op_id = path.strip("/").replace("/", "_")
+
+            tool_name = f"{app}__{op_id}"
+            description = operation.get("summary") or operation.get("description") or op_id
+
+            # Extract parameters from requestBody or parameters
+            properties: Dict[str, Any] = {}
+            required: List[str] = []
+
+            # Query/path params
+            for param in operation.get("parameters", []):
+                pname = param.get("name", "")
+                pschema = param.get("schema", {"type": "string"})
+                properties[pname] = pschema
+                if param.get("required", False):
+                    required.append(pname)
+
+            # Request body
+            body = operation.get("requestBody", {})
+            if body:
+                content = body.get("content", {})
+                json_content = content.get("application/json", {})
+                body_schema = json_content.get("schema", {})
+
+                # Resolve $ref if needed
+                if "$ref" in body_schema:
+                    ref_name = body_schema["$ref"].split("/")[-1]
+                    body_schema = schemas.get(ref_name, {})
+
+                body_props = body_schema.get("properties", {})
+                body_req   = body_schema.get("required", [])
+
+                # If body has a single embed field (FastAPI Body embed=True pattern)
+                if len(body_props) == 1:
+                    field_name = list(body_props.keys())[0]
+                    field_schema = body_props[field_name]
+                    if "$ref" in field_schema:
+                        ref_name = field_schema["$ref"].split("/")[-1]
+                        inner = schemas.get(ref_name, {})
+                        properties.update(inner.get("properties", {}))
+                        required.extend(inner.get("required", []))
+                    else:
+                        properties[field_name] = field_schema
+                        if field_name in body_req:
+                            required.append(field_name)
+                else:
+                    for pname, pschema in body_props.items():
+                        if "$ref" in pschema:
+                            ref_name = pschema["$ref"].split("/")[-1]
+                            pschema = schemas.get(ref_name, {"type": "object"})
+                        properties[pname] = pschema
+                    required.extend(body_req)
+
+            tools.append({
+                "name":        tool_name,
+                "description": f"[{app.upper()}] {description}",
+                "path":        path,
+                "http_method": http_method,
+                "properties":  properties,
+                "required":    list(set(required)),
+            })
+
+    return tools
+
+
+# ---------------------------------------------------------------------------
+# MCP Server
+# ---------------------------------------------------------------------------
 
 class AppWorldMCPServer:
     """
-    Wraps AppWorld's REST API as a proper MCP server.
-
-    For each AppWorld app, this server exposes its API methods as MCP tools
-    with proper JSON Schema input specifications — enabling the CCP module's
-    MCP-aware heuristics to operate on structured tool metadata.
-
-    Tool naming convention: {app_name}__{method_name}
-    (double-underscore separator matches AppWorld's naming)
+    Discovers all AppWorld APIs at startup via OpenAPI spec and exposes them
+    as MCP tools. Tool calls are forwarded to the AppWorld REST server via HTTP.
+    No appworld Python import required.
     """
 
-    # AppWorld apps and their primary API methods.
-    # Full list: appworld.tasks.api_docs() after server start.
-    APP_APIS: Dict[str, List[Dict]] = {
-        "amazon": [
-            {"name": "authenticate",    "description": "Log in and get session token.",
-             "params": {"username": "string", "password": "string"}},
-            {"name": "search_products", "description": "Search product catalog.",
-             "params": {"query": "string", "token": "string"}},
-            {"name": "get_product",     "description": "Get full product details by ID.",
-             "params": {"product_id": "string", "token": "string"}},
-            {"name": "add_to_cart",     "description": "Add item to shopping cart.",
-             "params": {"product_id": "string", "quantity": "integer", "token": "string"}},
-            {"name": "place_order",     "description": "Place order for cart contents.",
-             "params": {"cart_id": "string", "address": "string", "token": "string"}},
-            {"name": "get_order",       "description": "Get order details by order ID.",
-             "params": {"order_id": "string", "token": "string"}},
-            {"name": "list_orders",     "description": "List recent orders for account.",
-             "params": {"token": "string", "limit": "integer"}},
-        ],
-        "gmail": [
-            {"name": "authenticate",    "description": "Authenticate with Gmail.",
-             "params": {"username": "string", "password": "string"}},
-            {"name": "send_email",      "description": "Send an email.",
-             "params": {"to": "string", "subject": "string", "body": "string", "token": "string"}},
-            {"name": "list_emails",     "description": "List emails in inbox.",
-             "params": {"token": "string", "limit": "integer", "folder": "string"}},
-            {"name": "get_email",       "description": "Get full email content by ID.",
-             "params": {"email_id": "string", "token": "string"}},
-            {"name": "search_emails",   "description": "Search emails by query.",
-             "params": {"query": "string", "token": "string"}},
-        ],
-        "venmo": [
-            {"name": "authenticate",    "description": "Log in to Venmo.",
-             "params": {"username": "string", "password": "string"}},
-            {"name": "send_payment",    "description": "Send money to a user.",
-             "params": {"recipient": "string", "amount": "number",
-                        "note": "string", "token": "string"}},
-            {"name": "get_balance",     "description": "Get current account balance.",
-             "params": {"token": "string"}},
-            {"name": "list_transactions","description": "List recent transactions.",
-             "params": {"token": "string", "limit": "integer"}},
-        ],
-        "spotify": [
-            {"name": "authenticate",    "description": "Authenticate with Spotify.",
-             "params": {"username": "string", "password": "string"}},
-            {"name": "search_tracks",   "description": "Search for tracks.",
-             "params": {"query": "string", "token": "string", "limit": "integer"}},
-            {"name": "create_playlist", "description": "Create a new playlist.",
-             "params": {"name": "string", "description": "string", "token": "string"}},
-            {"name": "add_to_playlist", "description": "Add tracks to a playlist.",
-             "params": {"playlist_id": "string", "track_ids": "array", "token": "string"}},
-            {"name": "get_trending",    "description": "Get trending tracks.",
-             "params": {"token": "string", "limit": "integer"}},
-        ],
-        "contacts": [
-            {"name": "search",          "description": "Search contacts by name or email.",
-             "params": {"query": "string", "token": "string"}},
-            {"name": "get_contact",     "description": "Get contact details by ID.",
-             "params": {"contact_id": "string", "token": "string"}},
-            {"name": "list_contacts",   "description": "List all contacts.",
-             "params": {"token": "string"}},
-        ],
-        "phone": [
-            {"name": "send_sms",        "description": "Send an SMS message.",
-             "params": {"to": "string", "message": "string", "token": "string"}},
-            {"name": "list_messages",   "description": "List SMS messages.",
-             "params": {"token": "string", "limit": "integer"}},
-        ],
-    }
-
-    def __init__(self, apps: Optional[List[str]] = None):
-        self.apps = apps or list(self.APP_APIS.keys())
-        self.server = Server("appworld-ccp")
-        self._appworld_client = None
+    def __init__(self, appworld_url: str, apps: List[str]):
+        self.appworld_url = appworld_url.rstrip("/")
+        self.apps         = apps
+        self.server       = Server("appworld-mcp")
+        self._tools: List[Dict] = []
+        self._session = requests.Session()
         self._register_handlers()
 
-    def _get_client(self):
-        if not APPWORLD_AVAILABLE:
-            return None
-        if self._appworld_client is None:
-            self._appworld_client = AppWorldClient(base_url=APPWORLD_BASE_URL)
-        return self._appworld_client
-
-    def _build_tool_schema(self, app: str, api: Dict) -> mcp_types.Tool:
-        """Convert an AppWorld API spec into an MCP Tool with JSON Schema."""
-        tool_name = f"{app}__{api['name']}"
-        properties = {}
-        required = []
-
-        for param_name, param_type in api["params"].items():
-            type_map = {
-                "string": {"type": "string"},
-                "integer": {"type": "integer"},
-                "number": {"type": "number"},
-                "boolean": {"type": "boolean"},
-                "array": {"type": "array", "items": {"type": "string"}},
-            }
-            properties[param_name] = type_map.get(param_type, {"type": "string"})
-            # All params required except 'limit' and optional fields
-            if param_name not in ("limit", "description", "folder"):
-                required.append(param_name)
-
-        return mcp_types.Tool(
-            name=tool_name,
-            description=f"[{app.upper()}] {api['description']}",
-            inputSchema={
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        )
+    def _load_tools(self) -> List[Dict]:
+        """Fetch tool definitions from all app OpenAPI specs."""
+        all_tools = []
+        for app in self.apps:
+            app_tools = _fetch_app_tools(app, self.appworld_url)
+            all_tools.extend(app_tools)
+            if app_tools:
+                print(f"[MCP] {app}: {len(app_tools)} tools", file=sys.stderr)
+        print(f"[MCP] Total: {len(all_tools)} tools loaded", file=sys.stderr)
+        return all_tools
 
     def _register_handlers(self):
-        """Register MCP protocol handlers on the server."""
 
         @self.server.list_tools()
         async def list_tools() -> List[mcp_types.Tool]:
-            tools = []
-            for app in self.apps:
-                for api in self.APP_APIS.get(app, []):
-                    tools.append(self._build_tool_schema(app, api))
-            return tools
+            if not self._tools:
+                self._tools = self._load_tools()
+            return [
+                mcp_types.Tool(
+                    name=t["name"],
+                    description=t["description"],
+                    inputSchema={
+                        "type": "object",
+                        "properties": t["properties"],
+                        "required": t["required"],
+                    },
+                )
+                for t in self._tools
+            ]
 
         @self.server.call_tool()
         async def call_tool(
             name: str,
             arguments: Dict[str, Any],
         ) -> List[mcp_types.TextContent]:
-            """
-            Execute an AppWorld API call and return the result as MCP TextContent.
-            This is the hook point where CCP's ToolCallInterceptor operates.
-            """
-            # Parse tool name: {app}__{method}
-            if "__" not in name:
+            """Forward tool call to AppWorld REST server via HTTP."""
+
+            if not self._tools:
+                self._tools = self._load_tools()
+
+            # Find matching tool definition
+            tool_def = next((t for t in self._tools if t["name"] == name), None)
+
+            if tool_def is None:
                 return [mcp_types.TextContent(
                     type="text",
-                    text=json.dumps({"error": f"Invalid tool name: {name}"})
+                    text=json.dumps({"error": f"Unknown tool: {name}"}),
                 )]
 
-            app, method = name.split("__", 1)
-            client = self._get_client()
+            app     = name.split("__")[0]
+            path    = tool_def["path"]
+            http_m  = tool_def["http_method"]
+            url     = f"{self.appworld_url}/{app}{path}"
 
-            if client is not None:
-                # Real AppWorld call
-                try:
-                    result = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: client.execute(app=app, api=method, **arguments)
+            try:
+                fn = getattr(self._session, http_m)
+                if http_m in ("post", "put", "patch"):
+                    resp = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: fn(url, json=arguments, timeout=30)
                     )
-                    output = json.dumps(result) if not isinstance(result, str) else result
-                except Exception as exc:
-                    output = json.dumps({"error": str(exc), "status": "error"})
-            else:
-                # Mock response for development
-                output = json.dumps(_mock_response(app, method, arguments))
+                else:
+                    resp = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: fn(url, params=arguments, timeout=30)
+                    )
+                output = resp.text
+            except Exception as exc:
+                output = json.dumps({"error": str(exc), "status": "error"})
 
             return [mcp_types.TextContent(type="text", text=output)]
 
     async def run(self):
-        """Start the MCP server on stdio (for subprocess transport)."""
         async with stdio_server() as (read_stream, write_stream):
             await self.server.run(
                 read_stream,
@@ -226,44 +235,19 @@ class AppWorldMCPServer:
             )
 
 
-def _mock_response(app: str, method: str, args: Dict) -> Dict:
-    """Development mock — returns plausible responses without AppWorld running."""
-    import random
-    if method == "authenticate":
-        return {"token": f"tok_{app}_{random.randint(100000,999999)}",
-                "user_id": f"usr_{random.randint(1000,9999)}", "status": "ok"}
-    if method in ("search_products", "search_tracks", "search_emails", "search"):
-        return {"results": [{"id": f"id_{i}", "name": f"Result {i}"} for i in range(3)],
-                "total": 3}
-    if method in ("list_orders", "list_emails", "list_transactions",
-                  "list_contacts", "list_messages"):
-        return [{"id": f"item_{i}", "status": "ok"} for i in range(5)]
-    if method in ("add_to_cart",):
-        return {"cart_id": "cart_abc123", "status": "added"}
-    if method in ("place_order", "send_payment", "send_email", "send_sms"):
-        return {"id": f"id_{random.randint(10000,99999)}", "status": "confirmed"}
-    if method == "get_balance":
-        return {"balance": 142.50, "currency": "USD"}
-    return {"status": "ok", "data": {}}
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--app", default="all",
-        help="Which apps to expose (comma-separated, or 'all')"
-    )
+    parser.add_argument("--appworld-url", default=APPWORLD_URL)
+    parser.add_argument("--app", default="all",
+                        help="Comma-separated apps or 'all'")
     args = parser.parse_args()
 
-    apps = (
-        list(AppWorldMCPServer.APP_APIS.keys())
-        if args.app == "all"
-        else [a.strip() for a in args.app.split(",")]
-    )
+    apps = (ALL_APPS if args.app == "all"
+            else [a.strip() for a in args.app.split(",")])
 
-    server = AppWorldMCPServer(apps=apps)
+    server = AppWorldMCPServer(appworld_url=args.appworld_url, apps=apps)
     asyncio.run(server.run())

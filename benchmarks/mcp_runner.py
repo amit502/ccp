@@ -81,14 +81,14 @@ async def _run_one_task(
     t0 = time.time()
 
     try:
-        async with build_mcp_agent(
+        compiled, initial_state = await build_mcp_agent(
             goal=goal,
             manager=manager,
             server_configs=server_configs,
             max_steps=max_steps,
-        ) as (compiled, initial_state):
+        )
 
-            final_state = await compiled.ainvoke(initial_state)
+        final_state = await compiled.ainvoke(initial_state)
 
         success      = score_fn(task_id, final_state) >= 1.0
         final_answer = final_state.get("final_answer")
@@ -124,11 +124,25 @@ async def _run_all_tasks_async(
     max_steps:       int,
     score_fn:        Callable,
     verbose:         bool,
+    appworld_root:   str = "",
+    appworld_url:    str = "",
 ) -> List[TaskResult]:
-    """Run all tasks sequentially inside one event loop."""
+    """Run all tasks sequentially, seeding AppWorld databases per task."""
+    from .appworld_runner import _seed_task, _reset_task, APPWORLD_ROOT, APPWORLD_URL
+
+    _root = appworld_root or APPWORLD_ROOT
+    _url  = appworld_url  or APPWORLD_URL
+
     results = []
     for task in tasks:
-        manager = manager_factory()   # fresh manager per task
+        # Seed task-specific databases (AppWorld only — noop for other benchmarks)
+        if _root and _url:
+            seeded = _seed_task(task, _root, _url)
+            if not seeded:
+                print(f"  [WARN] Task {task.id} seeding failed — skipping")
+                continue
+
+        manager = manager_factory()
         manager.set_goal(task.goal)
         result = await _run_one_task(
             task_id=task.id,
@@ -140,12 +154,16 @@ async def _run_all_tasks_async(
             verbose=verbose,
         )
         results.append(result)
+
+        # Clear task databases after each task
+        if _root and _url:
+            _reset_task(task.id, _url)
+
         if verbose:
             status = "✓" if result.success else "✗"
             print(f"  {status} {task.id} | steps={result.steps} "
                   f"peak_tok={result.peak_tokens} t={result.time_elapsed:.1f}s")
     return results
-
 
 # ---------------------------------------------------------------------------
 # AppWorld MCP Runner
