@@ -1,0 +1,153 @@
+# Individual experiment job template.
+# Copy this file, change the metadata.name and EXPERIMENT value, then apply.
+#
+# EXPERIMENT options:
+#   appworld_all         — AppWorld, all 6 methods
+#   appworld_ccp         — AppWorld, CCP only
+#   appworld_fifo        — AppWorld, FIFO only
+#   appworld_acon        — AppWorld, ACON only
+#   appworld_no_compression
+#   appworld_retrieval
+#   appworld_token_perplexity
+#   multiqa_all          — Multi-objective QA, all 6 methods
+#   multiqa_ccp / multiqa_fifo / multiqa_acon / ...
+#   officebench_all      — OfficeBench (requires OFFICEBENCH_URL server)
+#   ablation_threshold   — A1: τ_H / τ_L sensitivity
+#   ablation_faithfulness — A2: binary scorer vs LLM scorer
+#   ablation_mcp_struct  — A3: MCP heuristics benefit
+#   ablation_online      — A4: CCP online vs ACON offline
+#   acon_optimize        — Run ACON offline optimization, save guidelines
+#
+# Example: run only AppWorld with CCP
+#   1. Set metadata.name: ccp-appworld-ccp
+#   2. Set EXPERIMENT: appworld_ccp
+#   3. kubectl apply -f this_file.yaml -n kc-ai-research-lab
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ccp-experiment          # CHANGE THIS for each run
+  namespace: kc-ai-research-lab
+spec:
+  template:
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/region: us-west
+        nautilus.io/linstor: "true"
+      containers:
+        - name: ccp-runner
+          image: python:3.11-slim
+          env:
+            - name: REPO_PATH
+              value: /app/ccp
+            - name: RESULTS_PATH
+              value: /results/ccp
+            - name: EXPERIMENT
+              value: appworld_all   # CHANGE THIS to the experiment you want
+            - name: MAX_TASKS
+              value: "50"
+            - name: MAX_STEPS
+              value: "40"
+            - name: APPWORLD_URL
+              value: http://localhost:8000
+            - name: MULTIQA_DATA_FILE
+              value: /results/ccp/data/nq-dev-00.jsonl.gz
+            - name: OFFICEBENCH_URL
+              value: http://localhost:8001    # only needed for officebench_* experiments
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: api-key
+          command:
+            - "bash"
+            - "-c"
+          args:
+            - |
+              set -e
+              echo "=== CCP: ${EXPERIMENT} ==="
+              echo "Results: ${RESULTS_PATH}"
+              echo "Started: $(date)"
+
+              apt-get update -qq && apt-get install -y git wget curl -qq
+
+              git clone https://github.com/amit502/ccp.git ${REPO_PATH}
+              cd ${REPO_PATH}
+              pip install -e ".[benchmark,dev]" -q
+              pip install matplotlib pandas -q
+
+              mkdir -p ${RESULTS_PATH}/data
+              mkdir -p ${RESULTS_PATH}/plots
+              mkdir -p ${RESULTS_PATH}/acon_guidelines
+
+              # Download NQ data if this is a multiqa experiment
+              if [[ "${EXPERIMENT}" == multiqa* ]] || [[ "${EXPERIMENT}" == "all" ]]; then
+                if [ ! -f ${MULTIQA_DATA_FILE} ]; then
+                  echo "Downloading NQ data..."
+                  wget -q -O ${MULTIQA_DATA_FILE} \
+                    https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
+                fi
+              fi
+
+              # Start AppWorld if this is an appworld/all/ablation experiment
+              if [[ "${EXPERIMENT}" == appworld* ]] || \
+                 [[ "${EXPERIMENT}" == "all" ]] || \
+                 [[ "${EXPERIMENT}" == ablation* ]] || \
+                 [[ "${EXPERIMENT}" == "acon_optimize" ]]; then
+
+                echo "Downloading AppWorld data..."
+                appworld download all --data-dir ${RESULTS_PATH}/data/appworld
+
+                echo "Starting AppWorld server..."
+                APPWORLD_DATA_DIR=${RESULTS_PATH}/data/appworld \
+                  appworld server start --port 8000 &
+                APPWORLD_PID=$!
+
+                for i in $(seq 1 12); do
+                  if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+                    echo "AppWorld server ready."; break
+                  fi
+                  echo "  Waiting... (${i}/12)"; sleep 5
+                done
+              fi
+
+              # Run the experiment
+              RESULTS_PATH=${RESULTS_PATH} \
+                python -m experiments.run_experiment \
+                  --experiment ${EXPERIMENT} \
+                  --tasks ${MAX_TASKS} \
+                  --steps ${MAX_STEPS}
+
+              # Generate plots for whatever CSVs exist
+              python plotting/plot_results.py \
+                --results-dir ${RESULTS_PATH} \
+                --output-dir  ${RESULTS_PATH}/plots \
+                --format pdf --dpi 300
+
+              kill ${APPWORLD_PID} 2>/dev/null || true
+
+              echo "=== Done: $(date) ==="
+              ls -lh ${RESULTS_PATH}/*.csv 2>/dev/null || true
+
+          volumeMounts:
+            - name: git-repo
+              mountPath: /app
+            - name: results-volume
+              mountPath: /results
+          resources:
+            requests:
+              memory: 8Gi
+              cpu: "4"
+            limits:
+              memory: 16Gi
+              cpu: "8"
+
+      volumes:
+        - name: git-repo
+          emptyDir: {}
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: reflexion-data-pvc
+
+      restartPolicy: Never
+  backoffLimit: 1

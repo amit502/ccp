@@ -1,0 +1,126 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ccp-officebench
+  namespace: kc-ai-research-lab
+spec:
+  template:
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/region: us-west
+        nautilus.io/linstor: "true"
+      containers:
+        - name: ccp-officebench-runner
+          image: ubuntu:22.04
+          env:
+            - name: REPO_PATH
+              value: /app/ccp
+            - name: OFFICEBENCH_PATH
+              value: /app/officebench
+            - name: RESULTS_PATH
+              value: /results/ccp
+            - name: EXPERIMENT
+              value: officebench_all
+            - name: MAX_TASKS
+              value: "50"
+            - name: MAX_STEPS
+              value: "25"
+            - name: OFFICEBENCH_URL
+              value: http://localhost:8001
+            - name: DISPLAY
+              value: ":99"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: api-key
+          command:
+            - "bash"
+            - "-c"
+          args:
+            - |
+              set -e
+              echo "=== CCP OfficeBench Job ==="
+              echo "Started: $(date)"
+
+              # ── 1. System dependencies ──────────────────────────────────
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq \
+                python3 python3-pip git wget curl \
+                libreoffice \
+                xvfb \
+                libgl1-mesa-glx \
+                libglib2.0-0
+
+              # ── 2. Start virtual display (headless LibreOffice needs this)
+              Xvfb :99 -screen 0 1024x768x24 -nolisten tcp &
+              XVFB_PID=$!
+              sleep 2
+              echo "Xvfb started on display :99"
+
+              # ── 3. Clone OfficeBench ────────────────────────────────────
+              git clone https://github.com/zlwangx/OfficeBench.git ${OFFICEBENCH_PATH}
+              cd ${OFFICEBENCH_PATH}
+              pip3 install -r requirements.txt -q
+
+              # ── 4. Start OfficeBench server in background ───────────────
+              python3 server.py --port 8001 &
+              OB_PID=$!
+
+              # Wait up to 60s for OfficeBench server to be ready
+              for i in $(seq 1 12); do
+                if curl -sf http://localhost:8001/health > /dev/null 2>&1; then
+                  echo "OfficeBench server ready."
+                  break
+                fi
+                echo "  Waiting for OfficeBench... (${i}/12)"
+                sleep 5
+              done
+
+              # ── 5. Clone and install CCP ────────────────────────────────
+              git clone https://github.com/amit502/ccp.git ${REPO_PATH}
+              cd ${REPO_PATH}
+              pip3 install -e ".[benchmark,dev]" -q
+
+              # ── 6. Create results directory ─────────────────────────────
+              mkdir -p ${RESULTS_PATH}
+
+              # ── 7. Run OfficeBench experiments ──────────────────────────
+              echo "=== Running OfficeBench: all 6 methods ==="
+              RESULTS_PATH=${RESULTS_PATH} \
+                python3 -m experiments.run_experiment \
+                  --experiment ${EXPERIMENT} \
+                  --tasks ${MAX_TASKS} \
+                  --steps ${MAX_STEPS}
+
+              # ── 8. Cleanup ──────────────────────────────────────────────
+              kill ${OB_PID}   2>/dev/null || true
+              kill ${XVFB_PID} 2>/dev/null || true
+
+              echo "=== Done: $(date) ==="
+              echo "CSVs saved:"
+              ls -lh ${RESULTS_PATH}/officebench*.csv 2>/dev/null || echo "  none found"
+
+          volumeMounts:
+            - name: git-repo
+              mountPath: /app
+            - name: results-volume
+              mountPath: /results
+          resources:
+            requests:
+              memory: 16Gi
+              cpu: "3"
+            limits:
+              memory: 16Gi
+              cpu: "3"
+
+      volumes:
+        - name: git-repo
+          emptyDir: {}
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: reflexion-data-pvc
+
+      restartPolicy: Never
+  backoffLimit: 1

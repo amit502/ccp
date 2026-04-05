@@ -1,0 +1,145 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ccp-all-experiments
+  namespace: kc-ai-research-lab
+spec:
+  template:
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/region: us-west
+        nautilus.io/linstor: "true"
+      containers:
+        - name: ccp-runner
+          image: python:3.11-slim
+          env:
+            - name: REPO_PATH
+              value: /app/ccp
+            - name: RESULTS_PATH
+              value: /results/ccp
+            - name: EXPERIMENT
+              value: all            # runs all baselines on all available benchmarks
+            - name: MAX_TASKS
+              value: "50"
+            - name: MAX_STEPS
+              value: "40"
+            - name: APPWORLD_URL
+              value: http://localhost:8000
+            - name: MULTIQA_DATA_FILE
+              value: /results/ccp/data/nq-dev-00.jsonl.gz
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: api-key
+          command:
+            - "bash"
+            - "-c"
+          args:
+            - |
+              set -e
+              echo "=== CCP Experiment Runner ==="
+              echo "Experiment : ${EXPERIMENT}"
+              echo "Results    : ${RESULTS_PATH}"
+              echo "Tasks      : ${MAX_TASKS}"
+              echo "Started    : $(date)"
+
+              # ── 1. System deps ──────────────────────────────────────────
+              apt-get update -qq && apt-get install -y git wget curl -qq
+
+              # ── 2. Clone and install CCP ────────────────────────────────
+              git clone https://github.com/amit502/ccp.git ${REPO_PATH}
+              cd ${REPO_PATH}
+              pip install -e ".[benchmark,dev]" -q
+              pip install matplotlib pandas -q
+
+              # ── 3. Create results directories ───────────────────────────
+              mkdir -p ${RESULTS_PATH}/data
+              mkdir -p ${RESULTS_PATH}/plots
+              mkdir -p ${RESULTS_PATH}/acon_guidelines
+
+              # ── 4. Download NQ data (Multi-QA benchmark) ────────────────
+              if [ ! -f ${MULTIQA_DATA_FILE} ]; then
+                echo "Downloading Natural Questions dev set..."
+                wget -q -O ${MULTIQA_DATA_FILE} \
+                  https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
+                echo "NQ data downloaded."
+              else
+                echo "NQ data already exists, skipping download."
+              fi
+
+              # ── 5. Download AppWorld data ───────────────────────────────
+              echo "Downloading AppWorld data..."
+              appworld download all --data-dir ${RESULTS_PATH}/data/appworld
+
+              # ── 6. Start AppWorld server in background ──────────────────
+              echo "Starting AppWorld server..."
+              APPWORLD_DATA_DIR=${RESULTS_PATH}/data/appworld \
+                appworld server start --port 8000 &
+              APPWORLD_PID=$!
+
+              # Wait up to 60s for AppWorld to be ready
+              for i in $(seq 1 12); do
+                if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+                  echo "AppWorld server ready."
+                  break
+                fi
+                echo "  Waiting for AppWorld... (${i}/12)"
+                sleep 5
+              done
+
+              # ── 7. Run ACON offline optimization first ──────────────────
+              echo "=== ACON Offline Optimization ==="
+              RESULTS_PATH=${RESULTS_PATH} \
+                python -m experiments.run_experiment \
+                  --experiment acon_optimize \
+                  --benchmark appworld \
+                  --tasks ${MAX_TASKS}
+
+              # ── 8. Run all experiments ──────────────────────────────────
+              echo "=== Running All Experiments ==="
+              RESULTS_PATH=${RESULTS_PATH} \
+                python -m experiments.run_experiment \
+                  --experiment ${EXPERIMENT} \
+                  --tasks ${MAX_TASKS} \
+                  --steps ${MAX_STEPS}
+
+              # ── 9. Generate all plots ───────────────────────────────────
+              echo "=== Generating Plots ==="
+              python plotting/plot_results.py \
+                --results-dir ${RESULTS_PATH} \
+                --output-dir  ${RESULTS_PATH}/plots \
+                --format pdf --dpi 300
+
+              # ── 10. Cleanup ─────────────────────────────────────────────
+              kill ${APPWORLD_PID} 2>/dev/null || true
+
+              echo "=== Job Complete ==="
+              echo "Finished: $(date)"
+              echo "Results:"
+              ls -lh ${RESULTS_PATH}/*.csv 2>/dev/null || echo "  (no CSVs yet)"
+              echo "Plots:"
+              ls -lh ${RESULTS_PATH}/plots/ 2>/dev/null || echo "  (no plots yet)"
+
+          volumeMounts:
+            - name: git-repo
+              mountPath: /app
+            - name: results-volume
+              mountPath: /results
+          resources:
+            requests:
+              memory: 8Gi
+              cpu: "4"
+            limits:
+              memory: 16Gi
+              cpu: "8"
+
+      volumes:
+        - name: git-repo
+          emptyDir: {}
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: reflexion-data-pvc
+
+      restartPolicy: Never
+  backoffLimit: 1

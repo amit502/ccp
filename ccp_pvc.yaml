@@ -1,0 +1,46 @@
+---
+# PVC for experiment results (plots, CSVs, ACON guidelines)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ccp-results-pvc
+  namespace: kc-ai-research-lab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+# PVC for benchmark data (AppWorld data, NQ JSONL, OfficeBench tasks)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ccp-data-pvc
+  namespace: kc-ai-research-lab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+# Secret for Nautilus LLM API credentials
+# Create with:
+#   kubectl create secret generic nautilus-llm-secret \
+#     --from-literal=api-key=YOUR_KEY \
+#     --from-literal=base-url=https://your-nautilus-endpoint/v1 \
+#     -n kc-ai-research-lab
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nautilus-llm-secret
+  namespace: kc-ai-research-lab
+type: Opaque
+stringData:
+  api-key:  "REPLACE_WITH_YOUR_NAUTILUS_API_KEY"
+  base-url: "REPLACE_WITH_YOUR_NAUTILUS_BASE_URL"

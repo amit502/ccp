@@ -1,0 +1,119 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ccp-appworld
+  namespace: kc-ai-research-lab
+spec:
+  template:
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/region: us-west
+        nautilus.io/linstor: "true"
+      containers:
+        - name: ccp-appworld-runner
+          image: ubuntu:22.04
+          env:
+            - name: REPO_PATH
+              value: /app/ccp
+            - name: RESULTS_PATH
+              value: /results/ccp
+            - name: EXPERIMENT
+              value: appworld_all
+            - name: MAX_TASKS
+              value: "50"
+            - name: MAX_STEPS
+              value: "40"
+            - name: APPWORLD_URL
+              value: http://localhost:8000
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: api-key
+          command:
+            - "bash"
+            - "-c"
+          args:
+            - |
+              set -e
+              echo "=== CCP AppWorld Job ==="
+              echo "Started: $(date)"
+
+              # ── 1. System dependencies ──────────────────────────────────
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq python3 python3-pip git wget curl
+
+              # ── 2. Clone and install CCP ────────────────────────────────
+              git clone https://github.com/amit502/ccp.git ${REPO_PATH}
+              cd ${REPO_PATH}
+              pip3 install -e ".[benchmark,dev]" -q
+
+              # ── 3. Create results directory ─────────────────────────────
+              mkdir -p ${RESULTS_PATH}/data/appworld
+              mkdir -p ${RESULTS_PATH}/acon_guidelines
+
+              # ── 4. Download AppWorld data ───────────────────────────────
+              echo "Downloading AppWorld data..."
+              appworld download all --data-dir ${RESULTS_PATH}/data/appworld
+
+              # ── 5. Start AppWorld server in background ──────────────────
+              echo "Starting AppWorld server..."
+              APPWORLD_DATA_DIR=${RESULTS_PATH}/data/appworld \
+                appworld server start --port 8000 &
+              APPWORLD_PID=$!
+
+              for i in $(seq 1 12); do
+                if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+                  echo "AppWorld server ready."
+                  break
+                fi
+                echo "  Waiting for AppWorld... (${i}/12)"
+                sleep 5
+              done
+
+              # ── 6. Run ACON offline optimization ────────────────────────
+              echo "=== ACON Offline Optimization ==="
+              RESULTS_PATH=${RESULTS_PATH} \
+                python3 -m experiments.run_experiment \
+                  --experiment acon_optimize \
+                  --benchmark appworld \
+                  --tasks ${MAX_TASKS}
+
+              # ── 7. Run all 6 methods on AppWorld ────────────────────────
+              echo "=== Running AppWorld: all 6 methods ==="
+              RESULTS_PATH=${RESULTS_PATH} \
+                python3 -m experiments.run_experiment \
+                  --experiment ${EXPERIMENT} \
+                  --tasks ${MAX_TASKS} \
+                  --steps ${MAX_STEPS}
+
+              # ── 8. Cleanup ──────────────────────────────────────────────
+              kill ${APPWORLD_PID} 2>/dev/null || true
+
+              echo "=== Done: $(date) ==="
+              echo "CSVs saved:"
+              ls -lh ${RESULTS_PATH}/appworld*.csv 2>/dev/null || echo "  none found"
+
+          volumeMounts:
+            - name: git-repo
+              mountPath: /app
+            - name: results-volume
+              mountPath: /results
+          resources:
+            requests:
+              memory: 16Gi
+              cpu: "3"
+            limits:
+              memory: 16Gi
+              cpu: "3"
+
+      volumes:
+        - name: git-repo
+          emptyDir: {}
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: reflexion-data-pvc
+
+      restartPolicy: Never
+  backoffLimit: 1

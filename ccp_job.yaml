@@ -1,0 +1,210 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ccp-experiment-job
+  namespace: kc-ai-research-lab
+spec:
+  template:
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/region: us-west
+        nautilus.io/linstor: "true"
+      initContainers:
+        # Init container: start AppWorld server and wait for it to be ready
+        - name: appworld-setup
+          image: python:3.11-slim
+          command: ["bash", "-c"]
+          args:
+            - |
+              pip install appworld -q
+              appworld download all
+              echo "AppWorld data downloaded"
+          env:
+            - name: APPWORLD_DATA_DIR
+              value: /data/appworld
+          volumeMounts:
+            - name: results-volume
+              mountPath: /results
+            - name: data-volume
+              mountPath: /data
+
+      containers:
+        # Sidecar: AppWorld API server (runs throughout the job)
+        - name: appworld-server
+          image: python:3.11-slim
+          command: ["bash", "-c"]
+          args:
+            - |
+              pip install appworld -q
+              appworld server start --port 8000 --data-dir /data/appworld
+          env:
+            - name: APPWORLD_DATA_DIR
+              value: /data/appworld
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: data-volume
+              mountPath: /data
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: "1"
+            limits:
+              memory: 4Gi
+              cpu: "2"
+
+        # Main container: CCP experiment runner
+        - name: ccp-runner
+          image: python:3.11-slim
+          env:
+            - name: REPO_PATH
+              value: /app/ccp
+            - name: RESULTS_PATH
+              value: /results/ccp
+            - name: APPWORLD_URL
+              value: http://localhost:8000
+            - name: OFFICEBENCH_URL
+              value: http://localhost:8001
+            - name: MULTIQA_DATA_FILE
+              value: /data/nq/nq-dev-00.jsonl.gz
+            - name: ACON_GUIDELINES_DIR
+              value: /results/ccp/acon_guidelines
+            - name: NAUTILUS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nautilus-llm-secret
+                  key: api-key
+            - name: NAUTILUS_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: nautilus-llm-secret
+                  key: base-url
+            # Experiment configuration
+            - name: MAX_TASKS
+              value: "50"
+            - name: MAX_STEPS
+              value: "40"
+            - name: ACON_OPT_ITERS
+              value: "5"
+            - name: BENCHMARK
+              value: "all"        # appworld | officebench | multi-qa | all
+            - name: RUN_ABLATIONS
+              value: "true"
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "=== CCP Experiment Runner ==="
+              echo "Timestamp: $(date)"
+              echo "Results:   ${RESULTS_PATH}"
+
+              # ── 1. Clone and install ──────────────────────────────────────
+              apt-get update -qq && apt-get install -y git wget -qq
+              git clone https://github.com/amit502/ccp.git ${REPO_PATH}
+              cd ${REPO_PATH}
+              pip install -e ".[benchmark,dev]" -q
+              pip install matplotlib pandas -q
+
+              # ── 2. Download NQ data ───────────────────────────────────────
+              mkdir -p /data/nq
+              if [ ! -f ${MULTIQA_DATA_FILE} ]; then
+                echo "Downloading Natural Questions dev set..."
+                wget -q -O ${MULTIQA_DATA_FILE} \
+                  https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
+              fi
+
+              # ── 3. Wait for AppWorld server ───────────────────────────────
+              echo "Waiting for AppWorld server..."
+              for i in $(seq 1 30); do
+                if curl -sf ${APPWORLD_URL}/health > /dev/null 2>&1; then
+                  echo "AppWorld server ready."
+                  break
+                fi
+                echo "  Attempt ${i}/30 — waiting 10s..."
+                sleep 10
+              done
+
+              # ── 4. Create results directory ───────────────────────────────
+              mkdir -p ${RESULTS_PATH}/plots
+              mkdir -p ${ACON_GUIDELINES_DIR}
+
+              # ── 5. Run ACON offline optimization (once, save guidelines) ──
+              echo "=== ACON Offline Optimization ==="
+              python -m experiments.run_experiment \
+                --acon-optimize \
+                --acon-iters ${ACON_OPT_ITERS} \
+                --benchmark appworld \
+                --tasks ${MAX_TASKS}
+
+              # ── 6. Main comparison — all benchmarks, all methods ──────────
+              echo "=== Main Comparison ==="
+              python -m experiments.run_experiment \
+                --benchmark ${BENCHMARK} \
+                --tasks ${MAX_TASKS} \
+                --steps ${MAX_STEPS}
+
+              # ── 7. Ablations ──────────────────────────────────────────────
+              if [ "${RUN_ABLATIONS}" = "true" ]; then
+                echo "=== Ablation A1: Threshold Sensitivity ==="
+                python -m experiments.run_experiment \
+                  --ablation threshold --tasks 30
+
+                echo "=== Ablation A2: Scorer Faithfulness ==="
+                python -m experiments.run_experiment \
+                  --ablation faithfulness --tasks 20
+
+                echo "=== Ablation A3: MCP Structure ==="
+                python -m experiments.run_experiment \
+                  --ablation mcp_struct --tasks 30
+
+                echo "=== Ablation A4: Online vs. Offline ==="
+                python -m experiments.run_experiment \
+                  --ablation online --tasks 30
+              fi
+
+              # ── 8. Copy results CSVs to PVC ───────────────────────────────
+              cp -r results/*.csv ${RESULTS_PATH}/
+              cp -r ${ACON_GUIDELINES_DIR} ${RESULTS_PATH}/
+
+              # ── 9. Generate plots ─────────────────────────────────────────
+              echo "=== Generating Plots ==="
+              python plotting/plot_results.py \
+                --results-dir ${RESULTS_PATH} \
+                --output-dir  ${RESULTS_PATH}/plots \
+                --format pdf \
+                --dpi 300
+
+              echo "=== Job Complete ==="
+              echo "Results saved to: ${RESULTS_PATH}"
+              ls -lh ${RESULTS_PATH}/
+              ls -lh ${RESULTS_PATH}/plots/
+
+          volumeMounts:
+            - name: app-volume
+              mountPath: /app
+            - name: results-volume
+              mountPath: /results
+            - name: data-volume
+              mountPath: /data
+          resources:
+            requests:
+              memory: 8Gi
+              cpu: "4"
+            limits:
+              memory: 16Gi
+              cpu: "8"
+
+      volumes:
+        - name: app-volume
+          emptyDir: {}
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: ccp-results-pvc
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: ccp-data-pvc
+
+      restartPolicy: Never
+
+  backoffLimit: 1

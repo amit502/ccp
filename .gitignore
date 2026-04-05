@@ -1,0 +1,64 @@
+# Virtual environments
+ccp-env/
+venv/
+env/
+.env/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+.installed.cfg
+lib/
+lib64/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Results and data (large files — stay on PVC, not in repo)
+results/
+acon_guidelines/
+data/
+
+# Plots
+*.pdf
+*.png
+*.svg
+
+# Secrets and environment
+.env
+*.env
+.envrc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Kubernetes generated
+*.kubeconfig

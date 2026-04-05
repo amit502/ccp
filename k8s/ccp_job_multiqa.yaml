@@ -1,0 +1,98 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ccp-multiqa
+  namespace: kc-ai-research-lab
+spec:
+  template:
+    spec:
+      nodeSelector:
+        topology.kubernetes.io/region: us-west
+        nautilus.io/linstor: "true"
+      containers:
+        - name: ccp-multiqa-runner
+          image: ubuntu:22.04
+          env:
+            - name: REPO_PATH
+              value: /app/ccp
+            - name: RESULTS_PATH
+              value: /results/ccp
+            - name: EXPERIMENT
+              value: multiqa_all
+            - name: MAX_TASKS
+              value: "50"
+            - name: MAX_STEPS
+              value: "20"
+            - name: MULTIQA_DATA_FILE
+              value: /results/ccp/data/nq-dev-00.jsonl.gz
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: api-key
+          command:
+            - "bash"
+            - "-c"
+          args:
+            - |
+              set -e
+              echo "=== CCP Multi-QA Job ==="
+              echo "Started: $(date)"
+
+              # ── 1. System dependencies ──────────────────────────────────
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq python3 python3-pip git wget
+
+              # ── 2. Clone and install CCP ────────────────────────────────
+              git clone https://github.com/amit502/ccp.git ${REPO_PATH}
+              cd ${REPO_PATH}
+              pip3 install -e ".[benchmark,dev]" -q
+
+              # ── 3. Create results directory ─────────────────────────────
+              mkdir -p ${RESULTS_PATH}/data
+
+              # ── 4. Download Natural Questions data ──────────────────────
+              if [ ! -f ${MULTIQA_DATA_FILE} ]; then
+                echo "Downloading Natural Questions dev set..."
+                wget -q -O ${MULTIQA_DATA_FILE} \
+                  https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
+                echo "NQ data downloaded."
+              else
+                echo "NQ data already exists, skipping."
+              fi
+
+              # ── 5. Run all 6 methods on Multi-QA ────────────────────────
+              echo "=== Running Multi-QA: all 6 methods ==="
+              RESULTS_PATH=${RESULTS_PATH} \
+                python3 -m experiments.run_experiment \
+                  --experiment ${EXPERIMENT} \
+                  --tasks ${MAX_TASKS} \
+                  --steps ${MAX_STEPS}
+
+              echo "=== Done: $(date) ==="
+              echo "CSVs saved:"
+              ls -lh ${RESULTS_PATH}/multiqa*.csv 2>/dev/null || echo "  none found"
+
+          volumeMounts:
+            - name: git-repo
+              mountPath: /app
+            - name: results-volume
+              mountPath: /results
+          resources:
+            requests:
+              memory: 8Gi
+              cpu: "2"
+            limits:
+              memory: 8Gi
+              cpu: "2"
+
+      volumes:
+        - name: git-repo
+          emptyDir: {}
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: reflexion-data-pvc
+
+      restartPolicy: Never
+  backoffLimit: 1
