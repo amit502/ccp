@@ -42,7 +42,7 @@ spec:
               # ── 1. System dependencies ──────────────────────────────────
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y -qq python3 python3-pip git wget curl
+              apt-get install -y -qq python3 python3-pip python3-venv git wget curl
 
               # ── 2. Clone and install CCP ────────────────────────────────
               git clone https://github.com/amit502/ccp.git ${REPO_PATH}
@@ -122,4 +122,4 @@ spec:
             claimName: reflexion-data-pvc
 
       restartPolicy: Never
-  backoffLimit: 1
+  backoffLimit: 0
