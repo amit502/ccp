@@ -43,6 +43,12 @@ from typing import Any, Callable, Dict, List, Optional
 RESULTS_DIR = Path(os.environ.get("RESULTS_PATH", "results"))
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Point ACON guidelines to RESULTS_DIR so they persist on PVC
+# and are loaded correctly during both optimization AND evaluation.
+import ccp.baselines.acon as _acon_module
+_acon_module.GUIDELINES_PATH = RESULTS_DIR / "acon_guidelines"
+(RESULTS_DIR / "acon_guidelines").mkdir(parents=True, exist_ok=True)
+
 # ---------------------------------------------------------------------------
 # Lazy imports (so missing optional deps don't crash at import time)
 # ---------------------------------------------------------------------------
@@ -367,11 +373,6 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
         ACONContextManager, ACONOfflineOptimizer, save_guidelines,
     )
     from ..benchmarks.mcp_runner import _run_one_task
-
-    # Point ACON guidelines to RESULTS_PATH so they persist on PVC
-    import ccp.baselines.acon as acon_module
-    acon_module.GUIDELINES_PATH = RESULTS_DIR / "acon_guidelines"
-    acon_module.GUIDELINES_PATH.mkdir(parents=True, exist_ok=True)
 
     # Use TRAIN split — keeps test split unseen during optimization
     train_runner = _make_appworld_runner(max_tasks=max_tasks, max_steps=30, split="train")

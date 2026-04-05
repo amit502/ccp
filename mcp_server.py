@@ -239,15 +239,58 @@ class AppWorldMCPServer:
 # Entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# HTTP server mode — keeps the server alive across all tasks in a method run
+# ---------------------------------------------------------------------------
+
+def run_http(port: int, appworld_url: str, apps: List[str]) -> None:
+    """
+    Start the MCP server as a persistent HTTP server using Starlette + uvicorn.
+    The server stays alive for all tasks, avoiding per-task OpenAPI re-fetching.
+
+    Client connects via StreamableHttpConnection:
+        {"transport": "streamable_http", "url": "http://localhost:{port}/mcp"}
+    """
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from mcp.server.streamable_http import StreamableHTTPServerTransport
+
+    mcp_server_instance = AppWorldMCPServer(
+        appworld_url=appworld_url,
+        apps=apps,
+    )
+    # Pre-load tools once at startup
+    mcp_server_instance._tools = mcp_server_instance._load_tools()
+
+    async def handle_mcp(scope, receive, send):
+        transport = StreamableHTTPServerTransport(mcp_session_id=None)
+        async with transport.connect(receive, send) as (r_stream, w_stream):
+            await mcp_server_instance.server.run(
+                r_stream, w_stream,
+                mcp_server_instance.server.create_initialization_options(),
+            )
+
+    app = Starlette(routes=[Mount("/mcp", app=handle_mcp)])
+    print(f"[MCP HTTP] Listening on http://0.0.0.0:{port}/mcp", file=sys.stderr)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--appworld-url", default=APPWORLD_URL)
-    parser.add_argument("--app", default="all",
-                        help="Comma-separated apps or 'all'")
+    parser.add_argument("--app", default="all")
+    parser.add_argument("--mode", default="stdio", choices=["stdio", "http"],
+                        help="Transport mode: stdio (per-task) or http (persistent)")
+    parser.add_argument("--port", type=int, default=8001,
+                        help="Port for HTTP mode")
     args = parser.parse_args()
 
     apps = (ALL_APPS if args.app == "all"
             else [a.strip() for a in args.app.split(",")])
 
-    server = AppWorldMCPServer(appworld_url=args.appworld_url, apps=apps)
-    asyncio.run(server.run())
+    if args.mode == "http":
+        run_http(port=args.port, appworld_url=args.appworld_url, apps=apps)
+    else:
+        server = AppWorldMCPServer(appworld_url=args.appworld_url, apps=apps)
+        asyncio.run(server.run())

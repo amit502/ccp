@@ -201,14 +201,36 @@ class AppWorldMCPRunner:
         print(f"[AppWorldMCPRunner] Loaded {len(self._tasks)} tasks from {APPWORLD_ROOT}")
 
     def _server_configs(self) -> Dict[str, Any]:
+        """Connect to persistent MCP HTTP server (started once per method run)."""
         return {
             "appworld": {
-                "command":   sys.executable,
-                "args":      [MCP_SERVER_SCRIPT, "--app", "all",
-                              "--appworld-url", APPWORLD_URL],
-                "transport": "stdio",
+                "transport": "streamable_http",
+                "url":       "http://localhost:8001/mcp",
             }
         }
+
+    def _start_mcp_server(self) -> Any:
+        """Start the MCP HTTP server as a background subprocess.
+        Fetches OpenAPI specs once at startup — not per task."""
+        import subprocess, time, requests as req
+        proc = subprocess.Popen(
+            [
+                sys.executable, MCP_SERVER_SCRIPT,
+                "--mode",         "http",
+                "--port",         "8001",
+                "--appworld-url", APPWORLD_URL,
+                "--app",          "all",
+            ],
+            stderr=sys.stderr,
+        )
+        # Wait up to 30s for server ready
+        for _ in range(60):
+            try:
+                req.get("http://localhost:8001/mcp", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.5)
+        return proc
 
     def evaluate(
         self,
@@ -217,20 +239,26 @@ class AppWorldMCPRunner:
         verbose:         bool = True,
     ) -> List[TaskResult]:
         if verbose:
-            print(f"\n[AppWorld/MCP] Running {method_name} on {len(self._tasks)} tasks "
-                  f"(APPWORLD_URL={APPWORLD_URL})")
+            print(f"\n[AppWorld/MCP] {method_name} | {len(self._tasks)} tasks")
 
-        configs = self._server_configs()
-        results = asyncio.run(
-            _run_all_tasks_async(
-                tasks=self._tasks,
-                manager_factory=manager_factory,
-                server_configs=configs,
-                max_steps=self.max_steps,
-                score_fn=self._score,
-                verbose=verbose,
+        # Start persistent MCP server once — serves all tasks in this run
+        mcp_proc = self._start_mcp_server()
+        try:
+            configs = self._server_configs()
+            results = asyncio.run(
+                _run_all_tasks_async(
+                    tasks=self._tasks,
+                    manager_factory=manager_factory,
+                    server_configs=configs,
+                    max_steps=self.max_steps,
+                    score_fn=self._score,
+                    verbose=verbose,
+                )
             )
-        )
+        finally:
+            mcp_proc.terminate()
+            mcp_proc.wait()
+
         for r in results:
             r.method = method_name
         return results
