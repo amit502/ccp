@@ -130,7 +130,7 @@ Otherwise call the most appropriate tool.
 # ---------------------------------------------------------------------------
 
 async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
-    from ..llm_client import call_llm
+    from llm_client import call_llm
     import json, re
 
     messages = state["messages"] or [
