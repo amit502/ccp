@@ -177,6 +177,82 @@ def _route(state: MCPAgentState) -> str:
 # Main entry point — accepts ANY context manager
 # ---------------------------------------------------------------------------
 
+
+
+class MutableInterceptor:
+    """
+    ToolCallInterceptor whose manager can be swapped between tasks.
+    One MultiServerMCPClient + one subprocess serves all tasks per method run.
+    """
+    def __init__(self):
+        self.manager: Optional[Any] = None
+
+    def set_manager(self, manager: Any) -> None:
+        self.manager = manager
+
+    async def __call__(self, request: Any, handler: Callable[..., Awaitable[Any]]) -> Any:
+        result = await handler(request)
+        if self.manager is None:
+            return result
+
+        raw_output = ""
+        if hasattr(result, "content"):
+            for block in result.content:
+                if hasattr(block, "text"):
+                    raw_output += block.text
+
+        element = self.manager.add_observation(
+            tool_name=request.name,
+            tool_input=dict(request.arguments or {}),
+            tool_output=raw_output,
+            status="ok",
+        )
+        compressed = getattr(element, "compressed_output", None)
+        if compressed is not None and compressed != raw_output:
+            from mcp import types as mcp_types
+            result = type(result)(
+                content=[mcp_types.TextContent(type="text", text=compressed)]
+            )
+        return result
+
+
+async def build_shared_client(server_configs: Dict[str, Any]) -> tuple:
+    """
+    Create one MultiServerMCPClient for all tasks in a method run.
+    Returns (client, tools, interceptor).
+    Call interceptor.set_manager(manager) before each task.
+    """
+    interceptor = MutableInterceptor()
+    client = MultiServerMCPClient(
+        connections=server_configs,
+        tool_interceptors=[interceptor],
+    )
+    tools = await client.get_tools()
+    return client, tools, interceptor
+
+
+async def run_agent_with_tools(
+    goal: str, tools: List[Any], max_steps: int,
+) -> Dict[str, Any]:
+    """Run agent with pre-built tools — no new MCP client created."""
+    graph = StateGraph(MCPAgentState)
+
+    async def agent_node(state):
+        return await _agent_node(state, tools)
+
+    graph.add_node("agent", agent_node)
+    graph.add_node("tools", ToolNode(tools))
+    graph.set_entry_point("agent")
+    graph.add_conditional_edges("agent", _route, {"tools": "tools", "end": END})
+    graph.add_edge("tools", "agent")
+    compiled = graph.compile()
+
+    return await compiled.ainvoke({
+        "messages": [], "goal": goal, "step": 0,
+        "max_steps": max_steps, "done": False, "final_answer": None,
+    })
+
+
 async def build_mcp_agent(
     goal:            str,
     manager:         Any,

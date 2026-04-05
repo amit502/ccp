@@ -129,15 +129,23 @@ async def _run_all_tasks_async(
     appworld_root:   str = "",
     appworld_url:    str = "",
 ) -> List[TaskResult]:
-    """Run all tasks sequentially, seeding AppWorld databases per task."""
+    """
+    Run all tasks sequentially with ONE shared MCP client.
+    The client (and its subprocess) is created once — OpenAPI specs fetched once.
+    The MutableInterceptor's manager is swapped per task.
+    """
+    from ..mcp_agent import build_shared_client, run_agent_with_tools
     from .appworld_runner import _seed_task, _reset_task, APPWORLD_ROOT, APPWORLD_URL
 
     _root = appworld_root or APPWORLD_ROOT
     _url  = appworld_url  or APPWORLD_URL
 
+    # Build shared client once — fetches tools/OpenAPI specs once for all tasks
+    _client, tools, interceptor = await build_shared_client(server_configs)
+
     results = []
     for task in tasks:
-        # Seed task-specific databases (AppWorld only — noop for other benchmarks)
+        # Seed task-specific databases (AppWorld only)
         if _root and _url:
             seeded = _seed_task(task, _root, _url)
             if not seeded:
@@ -146,20 +154,46 @@ async def _run_all_tasks_async(
 
         manager = manager_factory()
         manager.set_goal(task.goal)
-        result = await _run_one_task(
-            task_id=task.id,
-            goal=task.goal,
-            manager=manager,
-            server_configs=server_configs,
-            max_steps=max_steps,
-            score_fn=score_fn,
-            verbose=verbose,
-        )
-        results.append(result)
 
-        # Clear task databases after each task
+        # Point interceptor at this task's manager
+        interceptor.set_manager(manager)
+
+        t0 = time.time()
+        try:
+            final_state = await run_agent_with_tools(
+                goal=task.goal,
+                tools=tools,
+                max_steps=max_steps,
+            )
+            success      = score_fn(task.id, final_state) >= 1.0
+            final_answer = final_state.get("final_answer")
+        except Exception as exc:
+            import traceback
+            print(f"  [MCP] Task {task.id} error: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
+            success      = False
+            final_answer = None
+
+        # Reset interceptor so stale manager isn't used between tasks
+        interceptor.set_manager(None)
+
         if _root and _url:
             _reset_task(task.id, _url)
+
+        ctx   = manager.get_compressed_context()
+        result = TaskResult(
+            task_id=task.id,
+            goal=task.goal,
+            success=success,
+            steps=len(ctx.elements),
+            final_answer=final_answer,
+            peak_tokens=ctx.total_tokens(),
+            total_tokens=ctx.total_tokens(),
+            time_elapsed=time.time() - t0,
+            ccp_stats=manager.get_stats_log(),
+            method="",
+        )
+        results.append(result)
 
         if verbose:
             status = "✓" if result.success else "✗"
@@ -203,36 +237,14 @@ class AppWorldMCPRunner:
         print(f"[AppWorldMCPRunner] Loaded {len(self._tasks)} tasks from {APPWORLD_ROOT}")
 
     def _server_configs(self) -> Dict[str, Any]:
-        """Connect to persistent MCP HTTP server (started once per method run)."""
         return {
             "appworld": {
-                "transport": "streamable_http",
-                "url":       "http://localhost:8001/mcp",
+                "command":   sys.executable,
+                "args":      [MCP_SERVER_SCRIPT, "--app", "all",
+                              "--appworld-url", APPWORLD_URL],
+                "transport": "stdio",
             }
         }
-
-    def _start_mcp_server(self) -> Any:
-        """Start the MCP HTTP server as a background subprocess.
-        Fetches OpenAPI specs once at startup — not per task."""
-        import subprocess, time, requests as req
-        proc = subprocess.Popen(
-            [
-                sys.executable, MCP_SERVER_SCRIPT,
-                "--mode",         "http",
-                "--port",         "8001",
-                "--appworld-url", APPWORLD_URL,
-                "--app",          "all",
-            ],
-            stderr=sys.stderr,
-        )
-        # Wait up to 30s for server ready
-        for _ in range(60):
-            try:
-                req.get("http://localhost:8001/mcp", timeout=1)
-                break
-            except Exception:
-                time.sleep(0.5)
-        return proc
 
     def evaluate(
         self,
@@ -243,24 +255,16 @@ class AppWorldMCPRunner:
         if verbose:
             print(f"\n[AppWorld/MCP] {method_name} | {len(self._tasks)} tasks")
 
-        # Start persistent MCP server once — serves all tasks in this run
-        mcp_proc = self._start_mcp_server()
-        try:
-            configs = self._server_configs()
-            results = asyncio.run(
-                _run_all_tasks_async(
-                    tasks=self._tasks,
-                    manager_factory=manager_factory,
-                    server_configs=configs,
-                    max_steps=self.max_steps,
-                    score_fn=self._score,
-                    verbose=verbose,
-                )
+        results = asyncio.run(
+            _run_all_tasks_async(
+                tasks=self._tasks,
+                manager_factory=manager_factory,
+                server_configs=self._server_configs(),
+                max_steps=self.max_steps,
+                score_fn=self._score,
+                verbose=verbose,
             )
-        finally:
-            mcp_proc.terminate()
-            mcp_proc.wait()
-
+        )
         for r in results:
             r.method = method_name
         return results
