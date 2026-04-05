@@ -17,6 +17,8 @@ spec:
               value: /app/ccp
             - name: RESULTS_PATH
               value: /results/ccp
+            - name: APPWORLD_ROOT
+              value: /results/ccp/data/appworld
             - name: EXPERIMENT
               value: appworld_all
             - name: MAX_TASKS
@@ -25,6 +27,8 @@ spec:
               value: "40"
             - name: APPWORLD_URL
               value: http://localhost:8000
+            - name: PYTHONPATH
+              value: /app
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -42,7 +46,10 @@ spec:
               # ── 1. System dependencies ──────────────────────────────────
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y -qq python3 python3-pip python3-venv git wget curl
+              apt-get install -y -qq \
+                python3 python3-pip python3-venv \
+                python3.11 python3.11-venv \
+                git wget curl
 
               # ── 2. Clone and install CCP ────────────────────────────────
               git clone https://github.com/amit502/ccp.git ${REPO_PATH}
@@ -50,27 +57,40 @@ spec:
               pip3 install -r requirements.txt -q
               pip3 install -e . --no-deps -q
 
-              # ── 3. Create results directory ─────────────────────────────
-              mkdir -p ${RESULTS_PATH}/data/appworld
+              # ── 3. Create directories ───────────────────────────────────
+              mkdir -p ${APPWORLD_ROOT}
               mkdir -p ${RESULTS_PATH}/acon_guidelines
 
               # ── 4. Install AppWorld in isolated venv (needs pydantic<2) ─
-              python3 -m venv /app/appworld-env
+              python3.11 -m venv /app/appworld-env
               /app/appworld-env/bin/pip install appworld -q
 
-              # ── 5. Download AppWorld data ───────────────────────────────
-              echo "Downloading AppWorld data..."
-              /app/appworld-env/bin/appworld download all \
-                --data-dir ${RESULTS_PATH}/data/appworld
+              # ── 5. Unpack AppWorld encrypted code (always required) ─────
+              # Must run from APPWORLD_ROOT so appworld finds/creates files
+              # in the right place
+              cd ${APPWORLD_ROOT}
+              /app/appworld-env/bin/appworld install
 
-              # ── 6. Start AppWorld server in background ──────────────────
+              # ── 6. Download AppWorld data (skip if already on PVC) ──────
+              # Check and download run inside ${APPWORLD_ROOT} due to cd in step 5
+              # Full path checked: ${APPWORLD_ROOT}/data/base_dbs/admin.db
+              if [ ! -f "${APPWORLD_ROOT}/data/base_dbs/admin.db" ]; then
+                echo "Downloading AppWorld data to ${APPWORLD_ROOT}/data/ ..."
+                /app/appworld-env/bin/appworld download data
+              else
+                echo "AppWorld data found at ${APPWORLD_ROOT}/data/base_dbs/admin.db — skipping download."
+              fi
+
+              # ── 7. Start AppWorld server in background ──────────────────
+              # Server must run from APPWORLD_ROOT so it finds ./data/
               echo "Starting AppWorld server..."
-              APPWORLD_DATA_DIR=${RESULTS_PATH}/data/appworld \
-                /app/appworld-env/bin/appworld server start --port 8000 &
+              /app/appworld-env/bin/appworld serve apis \
+                --port 8000 --no-show-usage &
               APPWORLD_PID=$!
 
+              # Wait up to 60s for server to be ready
               for i in $(seq 1 12); do
-                if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+                if curl -sf http://localhost:8000/ > /dev/null 2>&1; then
                   echo "AppWorld server ready."
                   break
                 fi
@@ -78,28 +98,31 @@ spec:
                 sleep 5
               done
 
-              # ── 7. Run ACON offline optimization ────────────────────────
+              # Run experiments from /app so ccp is a proper package
+              cd /app
+
+              # ── 8. Run ACON offline optimization ────────────────────────
               echo "=== ACON Offline Optimization ==="
               RESULTS_PATH=${RESULTS_PATH} \
-                python3 -m experiments.run_experiment \
+                python3 -m ccp.experiments.run_experiment \
                   --experiment acon_optimize \
                   --benchmark appworld \
                   --tasks ${MAX_TASKS}
 
-              # ── 8. Run all 6 methods on AppWorld ────────────────────────
+              # ── 9. Run all 6 methods on AppWorld ────────────────────────
               echo "=== Running AppWorld: all 6 methods ==="
               RESULTS_PATH=${RESULTS_PATH} \
-                python3 -m experiments.run_experiment \
+                python3 -m ccp.experiments.run_experiment \
                   --experiment ${EXPERIMENT} \
                   --tasks ${MAX_TASKS} \
                   --steps ${MAX_STEPS}
 
-              # ── 9. Cleanup ──────────────────────────────────────────────
+              # ── 10. Cleanup ─────────────────────────────────────────────
               kill ${APPWORLD_PID} 2>/dev/null || true
 
               echo "=== Done: $(date) ==="
               echo "CSVs saved:"
-              ls -lh ${RESULTS_PATH}/appworld*.csv 2>/dev/null || echo "  none found"
+              ls -lh ${RESULTS_PATH}/*.csv 2>/dev/null || echo "  none found"
 
           volumeMounts:
             - name: git-repo

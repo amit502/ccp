@@ -156,15 +156,13 @@ class AppWorldMCPRunner:
     Runs every method (CCP, FIFO, ACON, NoCompression …) against AppWorld
     through real MCP servers.
 
-    MCP server processes:
-      - ccp/mcp_server.py is started with stdio transport, one process
-        per MultiServerMCPClient session (per task).
-      - The AppWorld REST server (localhost:8000) must be running separately:
-          appworld download all
-          appworld server start
+    Does NOT import the appworld Python package (pydantic v1 conflict).
+    Loads tasks directly from the filesystem and evaluates via REST.
 
-    One event loop for all tasks per method call. MCP server processes
-    are started and closed per task by MultiServerMCPClient.
+    Requires:
+        APPWORLD_ROOT env var  — path to appworld data directory
+        APPWORLD_URL env var   — appworld REST server URL (default localhost:8000)
+        appworld serve apis --port 8000  (running in background)
     """
 
     def __init__(self, split: str = "test", max_tasks: int = 50, max_steps: int = 40):
@@ -172,20 +170,19 @@ class AppWorldMCPRunner:
         self.max_tasks = max_tasks
         self.max_steps = max_steps
 
-        try:
-            from appworld import AppWorld
-            self.appworld = AppWorld(split=split)
-        except Exception as e:
+        from .appworld_runner import _load_tasks_from_fs, APPWORLD_ROOT, _evaluate_via_rest
+        self._score = _evaluate_via_rest
+
+        if not APPWORLD_ROOT:
             raise RuntimeError(
-                f"AppWorld unavailable: {e}\n"
-                "Run: appworld download all && appworld server start"
+                "APPWORLD_ROOT env var not set.\n"
+                "Set it to the appworld data directory and run:\n"
+                "  appworld serve apis --port 8000"
             )
+        self._tasks = _load_tasks_from_fs(APPWORLD_ROOT, split, max_tasks)
+        print(f"[AppWorldMCPRunner] Loaded {len(self._tasks)} tasks from {APPWORLD_ROOT}")
 
     def _server_configs(self) -> Dict[str, Any]:
-        """
-        One MCP server process per task. The server connects to AppWorld's
-        REST API at APPWORLD_URL and exposes all 457 APIs as MCP tools.
-        """
         return {
             "appworld": {
                 "command":   sys.executable,
@@ -195,23 +192,14 @@ class AppWorldMCPRunner:
             }
         }
 
-    def _score(self, task_id: str, final_state: Dict) -> float:
-        try:
-            env   = self.appworld.reset(task_id)
-            score = env.evaluate()
-            return float(score)
-        except Exception:
-            return 1.0 if final_state.get("done") else 0.0
-
     def evaluate(
         self,
         manager_factory: Callable[[], Any],
         method_name:     str = "ccp",
         verbose:         bool = True,
     ) -> List[TaskResult]:
-        tasks = list(self.appworld.tasks)[: self.max_tasks]
         if verbose:
-            print(f"\n[AppWorld/MCP] Running {method_name} on {len(tasks)} tasks "
+            print(f"\n[AppWorld/MCP] Running {method_name} on {len(self._tasks)} tasks "
                   f"(APPWORLD_URL={APPWORLD_URL})")
 
         configs = self._server_configs()

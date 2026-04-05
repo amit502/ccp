@@ -1,295 +1,226 @@
 """
 benchmarks/appworld_runner.py
 
-AppWorld benchmark integration for CCP evaluation.
+AppWorld benchmark integration that works WITHOUT importing the appworld
+Python package (which conflicts with pydantic v2).
 
-AppWorld provides 750 tasks across 9 apps and 457 APIs, making it the
-primary benchmark (matches ACON's primary benchmark).
+Task loading: reads task IDs and instructions directly from the data
+directory structure: {APPWORLD_ROOT}/data/tasks/{task_id}/specs.json
 
-Setup (run once, requires Docker):
-    pip install appworld
-    appworld download all
-    appworld server start   # starts the API server at localhost:8000
+Task execution: goes through real MCP servers that call the AppWorld
+REST API (serve apis) — no direct Python import needed.
 
-This module wraps the AppWorld Python client so tasks can be run through
-the CCP agent and baselines with a unified interface.
+Task evaluation: calls the AppWorld environment REST server's /evaluate
+endpoint via HTTP.
+
+Requires:
+    appworld serve apis --port 8000   (running in background)
+    APPWORLD_ROOT env var pointing to the data directory
+    APPWORLD_URL env var (default http://localhost:8000)
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
-# AppWorld imports — these work once `pip install appworld` is done
-# and the server is running.
-try:
-    from appworld import AppWorld
-    from appworld.task import Task
-    APPWORLD_AVAILABLE = True
-except ImportError:
-    APPWORLD_AVAILABLE = False
-    print("[AppWorld] Package not available — using mock tasks for development.")
+import requests
+
+APPWORLD_ROOT = os.environ.get("APPWORLD_ROOT", "")
+APPWORLD_URL  = os.environ.get("APPWORLD_URL", "http://localhost:8000")
 
 
 # ---------------------------------------------------------------------------
-# Task result dataclass
+# TaskResult — shared across all benchmark runners
 # ---------------------------------------------------------------------------
 
 @dataclass
 class TaskResult:
-    task_id:       str
-    goal:          str
-    success:       bool
-    steps:         int
-    final_answer:  Optional[str]
-    peak_tokens:   int
-    total_tokens:  int
-    time_elapsed:  float              # seconds
-    ccp_stats:     List[Any] = field(default_factory=list)
-    method:        str = "ccp"
+    task_id:      str
+    goal:         str
+    success:      bool
+    steps:        int
+    final_answer: Optional[str]
+    peak_tokens:  int
+    total_tokens: int
+    time_elapsed: float
+    ccp_stats:    List[Any] = field(default_factory=list)
+    method:       str = "ccp"
 
 
 # ---------------------------------------------------------------------------
-# AppWorld tool wrapper
-# Wraps AppWorld's API client so it matches the agent's tool registry format
+# Task loading — reads directly from filesystem, no appworld import
 # ---------------------------------------------------------------------------
 
-class AppWorldToolWrapper:
+def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[Any]:
     """
-    Wraps an AppWorld environment's API calls as named callables
-    that the agent can register with register_tool().
+    Read task IDs and instructions from:
+        {appworld_root}/data/tasks/{task_id}/specs.json
+
+    specs.json contains at minimum:
+        {"instruction": "...", "allowed_apps": [...], ...}
     """
+    tasks_dir = Path(appworld_root) / "data" / "tasks"
+    if not tasks_dir.exists():
+        raise RuntimeError(
+            f"AppWorld tasks directory not found: {tasks_dir}\n"
+            f"Set APPWORLD_ROOT and run: appworld download data"
+        )
 
-    def __init__(self, appworld_env):
-        self.env = appworld_env
+    tasks = []
+    # Task IDs follow pattern like test_1, test_2 etc — filter by split prefix
+    for task_dir in sorted(tasks_dir.iterdir()):
+        if not task_dir.is_dir():
+            continue
+        if split != "all" and not task_dir.name.startswith(split):
+            continue
+        specs_path = task_dir / "specs.json"
+        if not specs_path.exists():
+            continue
+        try:
+            specs = json.loads(specs_path.read_text())
+            tasks.append(SimpleNamespace(
+                id=task_dir.name,
+                goal=specs.get("instruction", ""),
+                apps=specs.get("allowed_apps", []),
+                data=specs,
+            ))
+        except (json.JSONDecodeError, KeyError):
+            continue
+        if len(tasks) >= max_tasks:
+            break
 
-    def make_tool(self, app_name: str, api_name: str) -> Callable:
-        """Return a callable that executes api_name on app_name."""
-        def tool(**kwargs) -> str:
-            result = self.env.execute(
-                app_name=app_name,
-                api_name=api_name,
-                **kwargs,
-            )
-            return json.dumps(result) if not isinstance(result, str) else result
-        tool.__name__ = f"{app_name}__{api_name}"
-        return tool
-
-    def register_all(self, tool_registry: Dict[str, Callable]) -> None:
-        """Register all available AppWorld tools into a tool registry."""
-        if not APPWORLD_AVAILABLE:
-            return
-        for app in self.env.apps:
-            for api in self.env.get_apis(app):
-                name = f"{app}__{api}"
-                tool_registry[name] = self.make_tool(app, api)
+    return tasks
 
 
 # ---------------------------------------------------------------------------
-# Runner
+# Evaluation via REST
+# ---------------------------------------------------------------------------
+
+def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
+    """Call AppWorld environment server to evaluate the task."""
+    try:
+        r = requests.post(
+            f"{APPWORLD_URL}/evaluate",
+            json={"task_id": task_id},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            result = r.json()
+            return float(result.get("score", 0.0))
+    except Exception:
+        pass
+    # Fallback: use agent's done flag
+    return 1.0 if final_state.get("done") else 0.0
+
+
+# ---------------------------------------------------------------------------
+# AppWorldRunner — used by ablation studies (non-MCP path)
 # ---------------------------------------------------------------------------
 
 class AppWorldRunner:
     """
-    Runs CCP (or a baseline) against AppWorld tasks and collects metrics.
+    Runs baselines against AppWorld tasks.
+    Uses filesystem for task loading, REST for evaluation.
+    No appworld Python import.
     """
 
-    def __init__(
-        self,
-        split:      str = "test",     # "train" | "dev" | "test"
-        max_tasks:  int = 50,         # How many tasks to run
-        max_steps:  int = 40,         # Max steps per task
-    ):
+    def __init__(self, split: str = "test", max_tasks: int = 50, max_steps: int = 40):
         self.split     = split
         self.max_tasks = max_tasks
         self.max_steps = max_steps
 
-        if APPWORLD_AVAILABLE:
-            # AppWorld v0.1.x API
-            self.appworld = AppWorld(split=split)
-        else:
-            self.appworld = None
-            print("[AppWorldRunner] Running in MOCK mode — no real API calls.")
+        if not APPWORLD_ROOT:
+            print("[AppWorldRunner] APPWORLD_ROOT not set — using mock tasks.")
+        self._tasks = self._load_tasks()
 
-    def _get_tasks(self) -> List[Any]:
-        if self.appworld is None:
+    def _load_tasks(self) -> List[Any]:
+        if not APPWORLD_ROOT:
             return self._mock_tasks()
-        tasks = list(self.appworld.tasks)
-        return tasks[: self.max_tasks]
-
-    # ------------------------------------------------------------------ #
-    # Main evaluation loop                                                 #
-    # ------------------------------------------------------------------ #
+        try:
+            return _load_tasks_from_fs(APPWORLD_ROOT, self.split, self.max_tasks)
+        except Exception as e:
+            print(f"[AppWorldRunner] Task load failed: {e} — using mocks.")
+            return self._mock_tasks()
 
     def evaluate(
         self,
-        manager_factory: Callable,    # Callable() → a context manager
+        manager_factory: Callable,
         method_name:     str = "ccp",
         verbose:         bool = True,
     ) -> List[TaskResult]:
-        """
-        Run all tasks with the given context manager and collect results.
+        from .mcp_runner import _run_all_tasks_async
+        import asyncio
+        from ..mcp_server import AppWorldMCPServer
+        import sys
 
-        Args:
-            manager_factory: Zero-arg callable that returns a fresh context manager.
-                             E.g.: lambda: CCPContextManager(tau_high=0.6, tau_low=0.3)
-            method_name:     Label for results ("ccp", "fifo", etc.)
-        """
-        from ..agent import _TOOL_REGISTRY, register_tool
+        MCP_SCRIPT = str(Path(__file__).parent.parent / "mcp_server.py")
+        configs = {
+            "appworld": {
+                "command":   sys.executable,
+                "args":      [MCP_SCRIPT, "--app", "all",
+                              "--appworld-url", APPWORLD_URL],
+                "transport": "stdio",
+            }
+        }
 
-        tasks   = self._get_tasks()
-        results = []
+        if verbose:
+            print(f"\n[AppWorld] {method_name} | {len(self._tasks)} tasks")
 
-        for i, task in enumerate(tasks):
-            if verbose:
-                print(f"\n[{method_name}] Task {i+1}/{len(tasks)}: {task.goal[:60]}...")
-
-            # Fresh manager and tool registry per task
-            manager = manager_factory()
-            manager.set_goal(task.goal)
-            _TOOL_REGISTRY.clear()
-
-            if self.appworld is not None:
-                env     = self.appworld.reset(task.id)
-                wrapper = AppWorldToolWrapper(env)
-                wrapper.register_all(_TOOL_REGISTRY)
-            else:
-                _register_mock_tools(_TOOL_REGISTRY)
-
-            # Run the agent
-            t0 = time.time()
-            result = _run_task(
-                task_id=task.id,
-                goal=task.goal,
-                manager=manager,
+        results = asyncio.run(
+            _run_all_tasks_async(
+                tasks=self._tasks,
+                manager_factory=manager_factory,
+                server_configs=configs,
                 max_steps=self.max_steps,
-                appworld_env=self.appworld,
+                score_fn=_evaluate_via_rest,
                 verbose=verbose,
             )
-            elapsed = time.time() - t0
-            result.time_elapsed = elapsed
-            result.method = method_name
-            results.append(result)
-
-            if verbose:
-                status = "✓" if result.success else "✗"
-                print(f"  {status} Steps: {result.steps} | "
-                      f"Peak tokens: {result.peak_tokens} | "
-                      f"Time: {elapsed:.1f}s")
-
+        )
+        for r in results:
+            r.method = method_name
         return results
 
-    # ------------------------------------------------------------------ #
-    # Mock tasks (used when AppWorld server is not running)               #
-    # ------------------------------------------------------------------ #
-
     def _mock_tasks(self) -> List[Any]:
-        from types import SimpleNamespace
-        tasks = []
-        mock_goals = [
-            "Send an email to Alice with subject 'Meeting Tomorrow' and body 'Are you free at 2pm?'",
-            "Order 2 units of 'Wireless Mouse' from Amazon and send the order confirmation to Bob via SMS",
-            "Create a Spotify playlist called 'Study Vibes' and add the top 5 trending songs",
-            "Transfer $50 to Charlie via Venmo with message 'Dinner split'",
-            "Find Alice's phone number in contacts and call her",
+        goals = [
+            "Send an email to Alice with subject 'Meeting Tomorrow'",
+            "Order 2 units of Wireless Mouse from Amazon and confirm via SMS",
+            "Create a Spotify playlist called Study Vibes with 5 trending songs",
+            "Transfer $50 to Charlie via Venmo with note Dinner split",
+            "Find Alice phone number in contacts and send her a message",
         ]
-        for i, goal in enumerate(mock_goals):
-            t = SimpleNamespace(id=f"mock_{i:03d}", goal=goal)
-            tasks.append(t)
-        return tasks[: self.max_tasks]
+        return [
+            SimpleNamespace(id=f"mock_{i:03d}", goal=g, apps=[], data={})
+            for i, g in enumerate(goals)
+        ][: self.max_tasks]
 
 
 # ---------------------------------------------------------------------------
-# Task execution (agent loop)
-# ---------------------------------------------------------------------------
-
-def _run_task(
-    task_id:      str,
-    goal:         str,
-    manager:      Any,
-    max_steps:    int,
-    appworld_env: Any,
-    verbose:      bool,
-) -> TaskResult:
-    """Run one task through the LangGraph agent and return a TaskResult."""
-    from ..agent import _TOOL_REGISTRY, agent_think, execute_tool
-
-    # Build a minimal state to drive the agent manually
-    # (avoids graph compilation overhead in tight eval loops)
-    state: Dict[str, Any] = {
-        "goal":         goal,
-        "step":         0,
-        "max_steps":    max_steps,
-        "done":         False,
-        "final_answer": None,
-        "ccp_manager":  manager,
-    }
-
-    peak_tokens  = 0
-    total_tokens = 0
-
-    while not state["done"] and state["step"] < max_steps:
-        state = agent_think(state)
-        state = execute_tool(state)
-
-        ctx_tokens = manager.get_compressed_context().total_tokens()
-        peak_tokens   = max(peak_tokens, ctx_tokens)
-        total_tokens += ctx_tokens
-
-    # Score success via AppWorld's evaluator if available
-    success = False
-    if appworld_env is not None:
-        try:
-            score = appworld_env.evaluate(task_id=task_id)
-            success = score >= 1.0
-        except Exception:
-            success = state.get("done", False)
-    else:
-        # Mock: treat "done" as success
-        success = state.get("done", False)
-
-    return TaskResult(
-        task_id=task_id,
-        goal=goal,
-        success=success,
-        steps=state["step"],
-        final_answer=state.get("final_answer"),
-        peak_tokens=peak_tokens,
-        total_tokens=total_tokens,
-        time_elapsed=0.0,
-        ccp_stats=manager.get_stats_log(),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Mock tools (development / unit testing)
+# Mock tools (for local development only)
 # ---------------------------------------------------------------------------
 
 def _register_mock_tools(registry: Dict[str, Any]) -> None:
-    """Register lightweight mock tools for local development."""
     import random
 
-    def mock_send_email(**kwargs):
-        return {"status": "sent", "message_id": f"msg_{random.randint(1000,9999)}"}
-
-    def mock_get_contacts(**kwargs):
-        return [{"name": "Alice", "email": "alice@example.com", "phone": "+1-555-0101"}]
-
-    def mock_search(**kwargs):
-        return {"results": [f"Result {i}" for i in range(5)], "total": 5}
-
-    def mock_authenticate(**kwargs):
-        return {"token": f"tok_{random.randint(100000,999999)}", "expires_in": 3600}
-
-    def mock_list_items(**kwargs):
-        return [f"Item {i}" for i in range(20)]
+    def mock_authenticate(**kw):  return {"token": f"tok_{random.randint(100000,999999)}", "status": "ok"}
+    def mock_search(**kw):        return {"results": [{"id": f"id_{i}", "name": f"Result {i}"} for i in range(3)]}
+    def mock_send(**kw):          return {"status": "sent", "id": f"msg_{random.randint(1000,9999)}"}
+    def mock_list(**kw):          return [{"id": f"item_{i}", "name": f"Item {i}"} for i in range(5)]
+    def mock_get(**kw):           return {"id": "obj_001", "status": "ok", "data": "sample"}
 
     registry.update({
-        "email__send":         mock_send_email,
-        "contacts__get_all":   mock_get_contacts,
-        "search__query":       mock_search,
-        "auth__login":         mock_authenticate,
-        "catalog__list_items": mock_list_items,
+        "amazon__authenticate": mock_authenticate,
+        "amazon__search":       mock_search,
+        "amazon__order":        mock_send,
+        "gmail__send":          mock_send,
+        "gmail__list":          mock_list,
+        "contacts__search":     mock_search,
+        "venmo__pay":           mock_send,
+        "spotify__search":      mock_search,
+        "spotify__create":      mock_get,
     })

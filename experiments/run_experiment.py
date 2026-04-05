@@ -383,8 +383,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
     if runner is None:
         return
 
-    tasks = (list(runner.appworld.tasks)[:max_tasks]
-             if hasattr(runner, "appworld") else runner._tasks)
+    tasks = runner._tasks
 
     optimizer = ACONOfflineOptimizer(
         benchmark=benchmark,

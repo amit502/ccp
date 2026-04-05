@@ -25,6 +25,8 @@ spec:
               value: "20"
             - name: MULTIQA_DATA_FILE
               value: /results/ccp/data/nq-dev-00.jsonl.gz
+            - name: PYTHONPATH
+              value: /app
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -47,7 +49,8 @@ spec:
               # ── 2. Clone and install CCP ────────────────────────────────
               git clone https://github.com/amit502/ccp.git ${REPO_PATH}
               cd ${REPO_PATH}
-              pip3 install -e ".[benchmark,dev]" -q
+              pip3 install -r requirements.txt -q
+              pip3 install -e . --no-deps -q
 
               # ── 3. Create results directory ─────────────────────────────
               mkdir -p ${RESULTS_PATH}/data
@@ -65,7 +68,7 @@ spec:
               # ── 5. Run all 6 methods on Multi-QA ────────────────────────
               echo "=== Running Multi-QA: all 6 methods ==="
               RESULTS_PATH=${RESULTS_PATH} \
-                python3 -m experiments.run_experiment \
+                python3 -m ccp.experiments.run_experiment \
                   --experiment ${EXPERIMENT} \
                   --tasks ${MAX_TASKS} \
                   --steps ${MAX_STEPS}
@@ -95,4 +98,4 @@ spec:
             claimName: reflexion-data-pvc
 
       restartPolicy: Never
-  backoffLimit: 1
+  backoffLimit: 0

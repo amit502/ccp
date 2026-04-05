@@ -134,8 +134,8 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
 
     llm = ChatOpenAI(
         model=os.environ.get("LLM_MODEL", "gpt-oss"),
-        base_url=os.environ.get("NAUTILUS_BASE_URL", ""),
-        api_key=os.environ.get("NAUTILUS_API_KEY", ""),
+        base_url=os.environ.get("OPENAI_BASE_URL", "https://llm.nrp-nautilus.io/"),
+        api_key=os.environ.get("OPENAI_API_KEY", ""),
         temperature=0.0,
     ).bind_tools(tools)
 
