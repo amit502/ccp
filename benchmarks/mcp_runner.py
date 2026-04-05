@@ -205,7 +205,7 @@ class AppWorldMCPRunner:
         configs = self._server_configs()
         results = asyncio.run(
             _run_all_tasks_async(
-                tasks=tasks,
+                tasks=self._tasks,
                 manager_factory=manager_factory,
                 server_configs=configs,
                 max_steps=self.max_steps,

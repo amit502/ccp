@@ -59,42 +59,47 @@ class TaskResult:
 
 def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[Any]:
     """
-    Read task IDs and instructions from:
-        {appworld_root}/data/tasks/{task_id}/specs.json
+    Read task IDs from {appworld_root}/data/datasets/{split}.txt
+    then load each task's instruction from data/tasks/{task_id}/specs.json.
 
-    specs.json contains at minimum:
-        {"instruction": "...", "allowed_apps": [...], ...}
+    AppWorld stores task IDs in dataset files, not as directory name prefixes.
     """
-    tasks_dir = Path(appworld_root) / "data" / "tasks"
+    root       = Path(appworld_root)
+    tasks_dir  = root / "data" / "tasks"
+    dataset_file = root / "data" / "datasets" / f"{split}.txt"
+
     if not tasks_dir.exists():
-        raise RuntimeError(
-            f"AppWorld tasks directory not found: {tasks_dir}\n"
-            f"Set APPWORLD_ROOT and run: appworld download data"
-        )
+        raise RuntimeError(f"AppWorld tasks directory not found: {tasks_dir}")
+
+    # Read task IDs from the dataset split file
+    if dataset_file.exists():
+        raw_ids = [l.strip() for l in dataset_file.read_text().splitlines() if l.strip()]
+        # Strip any tag suffixes (e.g. "task_001#tag" → "task_001")
+        task_ids = [tid.split("#")[0] for tid in raw_ids]
+    else:
+        # Fallback: list all task directories
+        print(f"[AppWorld] Dataset file not found: {dataset_file} — listing all tasks")
+        task_ids = [d.name for d in sorted(tasks_dir.iterdir()) if d.is_dir()]
+
+    task_ids = task_ids[:max_tasks]
 
     tasks = []
-    # Task IDs follow pattern like test_1, test_2 etc — filter by split prefix
-    for task_dir in sorted(tasks_dir.iterdir()):
-        if not task_dir.is_dir():
-            continue
-        if split != "all" and not task_dir.name.startswith(split):
-            continue
-        specs_path = task_dir / "specs.json"
+    for task_id in task_ids:
+        specs_path = tasks_dir / task_id / "specs.json"
         if not specs_path.exists():
             continue
         try:
             specs = json.loads(specs_path.read_text())
             tasks.append(SimpleNamespace(
-                id=task_dir.name,
+                id=task_id,
                 goal=specs.get("instruction", ""),
                 apps=specs.get("allowed_apps", []),
                 data=specs,
             ))
         except (json.JSONDecodeError, KeyError):
             continue
-        if len(tasks) >= max_tasks:
-            break
 
+    print(f"[AppWorld] Loaded {len(tasks)} tasks from split='{split}'")
     return tasks
 
 
