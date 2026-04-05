@@ -402,7 +402,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
         return manager.get_compressed_context().elements, result.success
 
     guidelines = optimizer.run(task_runner, tasks)
-    print(f"\n[ACON] Optimization complete. Guidelines at: {acon_module.GUIDELINES_PATH}")
+    print(f"\n[ACON] Optimization complete. Guidelines at: {_acon_module.GUIDELINES_PATH}")
 
 
 # ---------------------------------------------------------------------------

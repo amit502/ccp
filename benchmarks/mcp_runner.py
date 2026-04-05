@@ -94,8 +94,10 @@ async def _run_one_task(
         final_answer = final_state.get("final_answer")
 
     except Exception as exc:
+        import traceback
         if verbose:
             print(f"  [MCP] Task {task_id} error: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
         success      = False
         final_answer = None
 
