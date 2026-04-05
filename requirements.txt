@@ -44,41 +44,50 @@
 #   pip install pydantic==1.10.21 sqlmodel==0.0.10
 # ============================================================
 
-# Core LangGraph / LangChain stack (all require pydantic>=2)
-langgraph==0.2.28
-langchain==0.2.16
-langchain-core==0.2.38
-langchain-openai==0.1.25
+# ============================================================
+# Causal Context Pruning (CCP) — Dependencies
+# ============================================================
+#
+# NOTE: appworld is intentionally excluded here.
+# It requires pydantic<2 which conflicts with langgraph/langchain.
+# Installed separately in job scripts via an isolated venv.
+# ============================================================
 
-# OpenAI-compatible client (Nautilus endpoint)
-openai==1.51.0
+# Core LangGraph / LangChain stack
+# langchain-core omitted — resolved automatically as a transitive dep
+langgraph>=1.0.0
+langchain>=1.0.0
+langchain-openai>=1.0.0
+
+# OpenAI-compatible client
+openai>=1.50.0
 
 # MCP protocol
-mcp==1.0.0
-langchain-mcp-adapters==0.0.9
+mcp>=1.0.0
+langchain-mcp-adapters>=0.2.0
 
 # Retry logic
-tenacity==8.5.0
+tenacity>=8.2.0
 
 # HTTP client (OfficeBench REST, DuckDuckGo fallback)
-requests==2.32.3
+requests>=2.31.0
 
 # NQ dataset loading
-datasets==2.21.0
+datasets>=2.14.0
 
 # Tokenisation
-tiktoken==0.7.0
+tiktoken>=0.7.0
 
 # Numerical / data
-numpy==1.26.4
-pandas==2.2.3
+numpy>=1.26.0
+pandas>=2.1.0
 
 # Plotting
-matplotlib==3.9.2
+matplotlib>=3.8.0
 
 # Testing
-pytest==8.3.3
-pytest-mock==3.14.0
+pytest>=8.0.0
+pytest-mock>=3.12.0
 
 # Progress bars
-tqdm==4.66.5
+tqdm>=4.66.0

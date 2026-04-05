@@ -47,20 +47,26 @@ spec:
               # ── 2. Clone and install CCP ────────────────────────────────
               git clone https://github.com/amit502/ccp.git ${REPO_PATH}
               cd ${REPO_PATH}
-              pip3 install -e ".[benchmark,dev]" -q
+              pip3 install -r requirements.txt -q
+              pip3 install -e . --no-deps -q
 
               # ── 3. Create results directory ─────────────────────────────
               mkdir -p ${RESULTS_PATH}/data/appworld
               mkdir -p ${RESULTS_PATH}/acon_guidelines
 
-              # ── 4. Download AppWorld data ───────────────────────────────
-              echo "Downloading AppWorld data..."
-              appworld download all --data-dir ${RESULTS_PATH}/data/appworld
+              # ── 4. Install AppWorld in isolated venv (needs pydantic<2) ─
+              python3 -m venv /app/appworld-env
+              /app/appworld-env/bin/pip install appworld -q
 
-              # ── 5. Start AppWorld server in background ──────────────────
+              # ── 5. Download AppWorld data ───────────────────────────────
+              echo "Downloading AppWorld data..."
+              /app/appworld-env/bin/appworld download all \
+                --data-dir ${RESULTS_PATH}/data/appworld
+
+              # ── 6. Start AppWorld server in background ──────────────────
               echo "Starting AppWorld server..."
               APPWORLD_DATA_DIR=${RESULTS_PATH}/data/appworld \
-                appworld server start --port 8000 &
+                /app/appworld-env/bin/appworld server start --port 8000 &
               APPWORLD_PID=$!
 
               for i in $(seq 1 12); do
@@ -72,7 +78,7 @@ spec:
                 sleep 5
               done
 
-              # ── 6. Run ACON offline optimization ────────────────────────
+              # ── 7. Run ACON offline optimization ────────────────────────
               echo "=== ACON Offline Optimization ==="
               RESULTS_PATH=${RESULTS_PATH} \
                 python3 -m experiments.run_experiment \
@@ -80,7 +86,7 @@ spec:
                   --benchmark appworld \
                   --tasks ${MAX_TASKS}
 
-              # ── 7. Run all 6 methods on AppWorld ────────────────────────
+              # ── 8. Run all 6 methods on AppWorld ────────────────────────
               echo "=== Running AppWorld: all 6 methods ==="
               RESULTS_PATH=${RESULTS_PATH} \
                 python3 -m experiments.run_experiment \
@@ -88,7 +94,7 @@ spec:
                   --tasks ${MAX_TASKS} \
                   --steps ${MAX_STEPS}
 
-              # ── 8. Cleanup ──────────────────────────────────────────────
+              # ── 9. Cleanup ──────────────────────────────────────────────
               kill ${APPWORLD_PID} 2>/dev/null || true
 
               echo "=== Done: $(date) ==="
