@@ -12,7 +12,7 @@ from typing import List, Union
 
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
-NAUTILUS_BASE_URL = "https://llm.nrp-nautilus.io/"
+OPENAI_BASE_URL = "https://llm.nrp-nautilus.io/"
 MODEL = "gpt-oss"
 
 @dataclasses.dataclass
@@ -28,7 +28,7 @@ def _get_client():
         import openai
         _client = openai.OpenAI(
             api_key=os.environ["OPENAI_API_KEY"],
-            base_url=NAUTILUS_BASE_URL,
+            base_url=OPENAI_BASE_URL,
         )
     return _client
 
