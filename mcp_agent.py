@@ -130,29 +130,63 @@ Otherwise call the most appropriate tool.
 # ---------------------------------------------------------------------------
 
 async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
-    from langchain_openai import ChatOpenAI
-
-    llm = ChatOpenAI(
-        model=os.environ.get("LLM_MODEL", "gpt-oss"),
-        base_url=os.environ.get("OPENAI_BASE_URL", "https://llm.nrp-nautilus.io/"),
-        api_key=os.environ.get("OPENAI_API_KEY", ""),
-        temperature=0.0,
-    ).bind_tools(tools)
+    from ..llm_client import call_llm
+    import json, re
 
     messages = state["messages"] or [
         SystemMessage(content=_SYSTEM_PROMPT),
         HumanMessage(content=state["goal"]),
     ]
 
-    response = await llm.ainvoke(messages)
+    # Build tool descriptions for the prompt
+    tool_descriptions = "\n".join(
+        f"- {t.name}: {t.description}" for t in tools
+    )
 
+    # Build conversation history as plain text
+    history = ""
+    for m in messages:
+        if isinstance(m, SystemMessage):
+            history += f"System: {m.content}\n"
+        elif isinstance(m, HumanMessage):
+            history += f"User: {m.content}\n"
+        elif isinstance(m, AIMessage):
+            history += f"Assistant: {m.content}\n"
+        elif hasattr(m, "content"):
+            history += f"Tool result: {m.content}\n"
+
+    system = (
+        _SYSTEM_PROMPT + "\n\nAvailable tools:\n" + tool_descriptions
+    )
+
+    raw = await asyncio.get_event_loop().run_in_executor(
+        None, call_llm, system, history.strip()
+    )
+
+    # Parse tool call or final answer
     done = False
     final_answer = None
-    if isinstance(response, AIMessage) and response.content:
-        content = str(response.content)
-        if "FINAL ANSWER:" in content:
-            done = True
-            final_answer = content.split("FINAL ANSWER:", 1)[1].strip()
+    tool_calls = []
+
+    if "FINAL ANSWER:" in raw:
+        done = True
+        final_answer = raw.split("FINAL ANSWER:", 1)[1].strip()
+    else:
+        # Try to parse JSON tool call
+        try:
+            clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+            parsed = json.loads(clean)
+            if parsed.get("action") == "tool_call":
+                tool_calls = [{
+                    "name": parsed["tool"],
+                    "args": parsed.get("input", {}),
+                    "id":   f"call_{state['step']}",
+                    "type": "tool_call",
+                }]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    response = AIMessage(content=raw, tool_calls=tool_calls)
 
     return {
         **state,
