@@ -118,10 +118,18 @@ class MCPAgentState(TypedDict):
 
 
 _SYSTEM_PROMPT = """\
-You are a task-completion agent. Use the available tools to complete the goal.
-When the task is done, respond with exactly:
-  FINAL ANSWER: <your answer>
-Otherwise call the most appropriate tool.
+You are a task-completion agent. Complete the given goal by calling tools.
+
+To call a tool respond with ONLY this JSON (nothing else before or after):
+{"action": "tool_call", "tool": "<exact_tool_name>", "input": {<params>}}
+
+When the task is fully complete respond with ONLY:
+FINAL ANSWER: <your answer>
+
+Rules:
+- Respond with JSON tool call OR FINAL ANSWER only — no prose, no explanation.
+- Study the available tools and their descriptions carefully.
+- Use tool results to make progress step by step.
 """
 
 
@@ -130,62 +138,104 @@ Otherwise call the most appropriate tool.
 # ---------------------------------------------------------------------------
 
 async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
-    from llm_client import call_llm
+    """
+    Agent node that calls the Nautilus LLM and parses the response.
+    Uses response_format={"type": "json_object"} so the LLM always returns JSON.
+    Falls back to regex parsing if JSON is malformed.
+    """
     import json, re
+    from ..llm_client import _get_client, MODEL
 
-    messages = state["messages"] or [
-        SystemMessage(content=_SYSTEM_PROMPT),
-        HumanMessage(content=state["goal"]),
-    ]
-
-    # Build tool descriptions for the prompt
-    tool_descriptions = "\n".join(
-        f"- {t.name}: {t.description}" for t in tools
+    # Build tool list for the prompt
+    tool_list = "\n".join(
+        f"  {t.name}: {t.description}" for t in tools
     )
 
-    # Build conversation history as plain text
-    history = ""
-    for m in messages:
+    # Build conversation history
+    history_parts = []
+    for m in state["messages"]:
         if isinstance(m, SystemMessage):
-            history += f"System: {m.content}\n"
+            pass  # system prompt sent separately
         elif isinstance(m, HumanMessage):
-            history += f"User: {m.content}\n"
+            history_parts.append(f"User: {m.content}")
         elif isinstance(m, AIMessage):
-            history += f"Assistant: {m.content}\n"
+            history_parts.append(f"Assistant: {m.content}")
         elif hasattr(m, "content"):
-            history += f"Tool result: {m.content}\n"
+            history_parts.append(f"Tool result: {m.content}")
+    history = "\n".join(history_parts)
 
-    system = (
-        _SYSTEM_PROMPT + "\n\nAvailable tools:\n" + tool_descriptions
-    )
+    system = f"""You are a task-completion agent. Respond ONLY with a JSON object.
 
-    raw = await asyncio.get_event_loop().run_in_executor(
-        None, call_llm, system, history.strip()
-    )
+Available tools:
+{tool_list}
 
-    # Parse tool call or final answer
+To call a tool:
+{{"action": "tool_call", "tool": "<tool_name>", "input": {{"<param>": "<value>"}}}}
+
+When the task is fully done:
+{{"action": "finish", "answer": "<your final answer>"}}
+
+No prose. No explanation. JSON only."""
+
+    user = history.strip() if history.strip() else f"Complete this task: {state['goal']}"
+
+    # First call: no messages in history yet
+    if not state["messages"]:
+        user = state["goal"]
+
+    # Call LLM with JSON mode
+    try:
+        client = _get_client()
+        completion = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        raw = completion.choices[0].message.content or ""
+    except Exception as e:
+        print(f"  [LLM] error: {e}", flush=True)
+        raw = ""
+
+    # Debug first step
+    if state["step"] == 0:
+        print(f"  [LLM step=0] {raw[:150]!r}", flush=True)
+
+    # Parse JSON response
     done = False
     final_answer = None
     tool_calls = []
 
-    if "FINAL ANSWER:" in raw:
-        done = True
-        final_answer = raw.split("FINAL ANSWER:", 1)[1].strip()
-    else:
-        # Try to parse JSON tool call
-        try:
-            clean = re.sub(r"```(?:json)?|```", "", raw).strip()
-            parsed = json.loads(clean)
-            if parsed.get("action") == "tool_call":
-                tool_calls = [{
-                    "name": parsed["tool"],
-                    "args": parsed.get("input", {}),
-                    "id":   f"call_{state['step']}",
-                    "type": "tool_call",
-                }]
-        except (json.JSONDecodeError, KeyError):
-            pass
+    try:
+        clean  = re.sub(r"```(?:json)?|```", "", raw).strip()
+        parsed = json.loads(clean)
+        action = parsed.get("action", "")
 
+        if action == "finish":
+            done         = True
+            final_answer = parsed.get("answer", "")
+        elif action == "tool_call":
+            tool_calls = [{
+                "name": parsed["tool"],
+                "args": parsed.get("input", {}),
+                "id":   f"call_{state['step']}",
+                "type": "tool_call",
+            }]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        # Fallback: check for FINAL ANSWER in raw text
+        if "FINAL ANSWER:" in raw:
+            done         = True
+            final_answer = raw.split("FINAL ANSWER:", 1)[1].strip()
+        else:
+            print(f"  [LLM] parse failed: {raw[:100]!r}", flush=True)
+
+    messages = state["messages"] or [
+        SystemMessage(content=system),
+        HumanMessage(content=user),
+    ]
     response = AIMessage(content=raw, tool_calls=tool_calls)
 
     return {
