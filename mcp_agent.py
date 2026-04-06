@@ -164,24 +164,36 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
             history_parts.append(f"Tool result: {m.content}")
     history = "\n".join(history_parts)
 
-    system = f"""You are a task-completion agent. Respond ONLY with a JSON object.
+    # Show only tool names + first sentence of description to save context
+    tool_summary = "\n".join(
+        f"  {t.name}: {t.description.split('.')[0]}" for t in tools[:60]
+    )
+    if len(tools) > 60:
+        tool_summary += f"\n  ... and {len(tools)-60} more tools (use {tools[60].name.split('__')[0]}__ prefix)"
 
-Available tools:
-{tool_list}
+    system = f"""You are an autonomous task-completion agent. You have tools to complete tasks.
 
-To call a tool:
-{{"action": "tool_call", "tool": "<tool_name>", "input": {{"<param>": "<value>"}}}}
+CRITICAL RULES:
+- NEVER ask the user for information — use tools to find it yourself.
+- NEVER say you cannot complete a task — try tools first.
+- Respond ONLY with a JSON object, no prose.
 
-When the task is fully done:
+To call a tool respond with:
+{{"action": "tool_call", "tool": "<exact_tool_name>", "input": {{"<param>": "<value>"}}}}
+
+When the task is fully done respond with:
 {{"action": "finish", "answer": "<your final answer>"}}
 
-No prose. No explanation. JSON only."""
+Available tools (use exact names):
+{tool_summary}
 
-    user = history.strip() if history.strip() else f"Complete this task: {state['goal']}"
+Goal: {{goal}}"""
 
-    # First call: no messages in history yet
-    if not state["messages"]:
-        user = state["goal"]
+    # Inject goal into system prompt
+    system = system.replace("{goal}", state["goal"])
+
+    # User message: history of tool calls so far, or initial prompt
+    user = history.strip() if history.strip() else "Begin. Call the first tool now."
 
     # Call LLM with JSON mode
     try:
