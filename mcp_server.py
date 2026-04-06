@@ -35,7 +35,9 @@ APPWORLD_URL = os.environ.get("APPWORLD_URL", "http://localhost:8000")
 
 # All AppWorld app names (from APP_TO_DESCRIPTION in appworld source)
 ALL_APPS = [
-    "admin", "api_docs", "supervisor",
+    # Real user-facing apps — api_docs excluded (internal, has broken constants)
+    # admin excluded (internal task management, not for agent tool calls)
+    "supervisor",
     "amazon", "phone", "file_system", "spotify",
     "venmo", "gmail", "splitwise", "simple_note", "todoist",
 ]

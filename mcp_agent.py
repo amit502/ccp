@@ -207,8 +207,17 @@ Goal: {{goal}}"""
             temperature=0.0,
         )
         raw = completion.choices[0].message.content or ""
+        if not raw:
+            print(
+                f"  [LLM] empty content. "
+                f"finish_reason={completion.choices[0].finish_reason!r} "
+                f"usage={completion.usage}",
+                flush=True,
+            )
     except Exception as e:
-        print(f"  [LLM] error: {e}", flush=True)
+        import traceback
+        print(f"  [LLM] error: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
         raw = ""
 
     # Debug first step
