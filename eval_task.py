@@ -1,26 +1,42 @@
 #!/usr/bin/env python3
 """
-Standalone AppWorld task evaluator.
-Run with the appworld venv Python.
+Standalone AppWorld task evaluator — runs inside the appworld venv.
 Usage: python eval_task.py <task_id> <appworld_root>
-Prints JSON: {"success": true/false, "pass_count": N, "num_tests": N}
+Outputs ONLY JSON to stdout: {"success": true/false, "pass_count": N, "num_tests": N}
+All other output goes to stderr.
 """
-import sys, json, os
+import sys
+import json
+import os
 
-task_id      = sys.argv[1]
+# Redirect all prints/warnings to stderr so stdout stays clean JSON
+import warnings
+warnings.filterwarnings("ignore")
+
+task_id       = sys.argv[1]
 appworld_root = sys.argv[2]
 
-# Set root so path_store finds data
-from appworld.common.path_store import path_store
-path_store.set_root(appworld_root)
-
-from appworld.evaluator import evaluate_task
 try:
+    from appworld.common.path_store import path_store
+    path_store.set_root(appworld_root)
+
+    # Suppress any stdout from evaluator
+    import io
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+
+    from appworld.evaluator import evaluate_task
     result = evaluate_task(task_id=task_id, suppress_errors=True, save_report=False)
+
+    sys.stdout = old_stdout
+
     print(json.dumps({
-        "success":    result.success,
-        "pass_count": result.pass_count,
-        "num_tests":  result.num_tests,
+        "success":    bool(result.success),
+        "pass_count": int(result.pass_count),
+        "num_tests":  int(result.num_tests),
     }))
+
 except Exception as e:
+    sys.stdout = sys.__stdout__  # restore in case of error
     print(json.dumps({"success": False, "error": str(e)}))
+    print(f"[eval_task] error: {e}", file=sys.stderr)

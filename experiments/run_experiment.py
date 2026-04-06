@@ -389,6 +389,14 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
 
     def task_runner(task, manager):
         """Run one task through real MCP for trajectory collection."""
+        from ..benchmarks.appworld_runner import (
+            _seed_task, _reset_task, APPWORLD_ROOT, APPWORLD_URL,
+        )
+        # Seed task databases before running
+        if APPWORLD_ROOT and APPWORLD_URL:
+            if not _seed_task(task, APPWORLD_ROOT, APPWORLD_URL):
+                return [], False
+
         configs = train_runner._server_configs()
         result = asyncio.run(_run_one_task(
             task_id=task.id,
@@ -397,8 +405,12 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
             server_configs=configs,
             max_steps=30,
             score_fn=lambda tid, fs: 1.0 if fs.get("done") else 0.0,
-            verbose=False,
+            verbose=True,
         ))
+
+        if APPWORLD_ROOT and APPWORLD_URL:
+            _reset_task(task.id, APPWORLD_URL)
+
         return manager.get_compressed_context().elements, result.success
 
     guidelines = optimizer.run(task_runner, tasks)

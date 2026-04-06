@@ -176,11 +176,16 @@ def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
             [venv_python, eval_script, task_id, APPWORLD_ROOT],
             capture_output=True, text=True, timeout=60,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            data = _json.loads(result.stdout.strip())
-            return 1.0 if data.get("success") else 0.0
+        stdout = result.stdout.strip()
+        if stdout:
+            # Find the last line that looks like JSON
+            for line in reversed(stdout.splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    data = _json.loads(line)
+                    return 1.0 if data.get("success") else 0.0
         if result.stderr:
-            print(f"  [eval] {result.stderr[:200]}")
+            print(f"  [eval] {result.stderr[:300]}", flush=True)
     except Exception as e:
         print(f"  [eval] error: {e}")
     return 1.0 if final_state.get("done") else 0.0
