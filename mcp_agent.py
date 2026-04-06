@@ -88,7 +88,7 @@ class GenericToolCallInterceptor:
         # 3. Feed through the context manager (CCP scores; FIFO tracks; etc.)
         element = self.manager.add_observation(
             tool_name=request.name,
-            tool_input=dict(request.arguments or {}),
+            tool_input=dict(request.args or {}),
             tool_output=raw_output,
             status="ok",
         )
@@ -140,7 +140,7 @@ Rules:
 async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
     """
     Agent node that calls the Nautilus LLM and parses the response.
-    Uses response_format={"type": "json_object"} so the LLM always returns JSON.
+    Prompts LLM to return JSON; falls back to regex parsing.
     Falls back to regex parsing if JSON is malformed.
     """
     import json, re
@@ -205,7 +205,6 @@ Goal: {{goal}}"""
                 {"role": "user",   "content": user},
             ],
             temperature=0.0,
-            response_format={"type": "json_object"},
         )
         raw = completion.choices[0].message.content or ""
     except Exception as e:
@@ -299,7 +298,7 @@ class MutableInterceptor:
 
         element = self.manager.add_observation(
             tool_name=request.name,
-            tool_input=dict(request.arguments or {}),
+            tool_input=dict(request.args or {}),
             tool_output=raw_output,
             status="ok",
         )
