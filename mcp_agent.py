@@ -144,7 +144,7 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
     Falls back to regex parsing if JSON is malformed.
     """
     import json, re
-    from ..llm_client import _get_client, MODEL
+    from llm_client import _get_client, MODEL
 
     # Build tool list for the prompt
     tool_list = "\n".join(
