@@ -27,8 +27,8 @@ spec:
               value: "40"
             - name: APPWORLD_URL
               value: http://localhost:8000
-            - name: APPWORLD_ENV_URL
-              value: http://localhost:8002
+            - name: APPWORLD_VENV
+              value: /app/appworld-env
             - name: PYTHONPATH
               value: /app
             - name: OPENAI_API_KEY
@@ -85,26 +85,17 @@ spec:
 
               # ── 7. Start AppWorld server in background ──────────────────
               # Server must run from APPWORLD_ROOT so it finds ./data/
-              echo "Starting AppWorld API server (port 8000)..."
+              echo "Starting AppWorld server..."
               /app/appworld-env/bin/appworld serve apis \
                 --port 8000 --no-show-usage &
               APIS_PID=$!
 
-              echo "Starting AppWorld environment server (port 8002)..."
-              /app/appworld-env/bin/appworld serve environment \
-                --port 8002 --no-show-usage &
-              ENV_PID=$!
-
-              # Wait up to 60s for both servers to be ready
               for i in $(seq 1 12); do
-                APIS_OK=0; ENV_OK=0
-                curl -sf http://localhost:8000/ > /dev/null 2>&1 && APIS_OK=1
-                curl -sf http://localhost:8002/ > /dev/null 2>&1 && ENV_OK=1
-                if [ $APIS_OK -eq 1 ] && [ $ENV_OK -eq 1 ]; then
-                  echo "Both AppWorld servers ready."
+                if curl -sf http://localhost:8000/ > /dev/null 2>&1; then
+                  echo "AppWorld server ready."
                   break
                 fi
-                echo "  Waiting... apis=${APIS_OK} env=${ENV_OK} (${i}/12)"
+                echo "  Waiting for AppWorld... (${i}/12)"
                 sleep 5
               done
 
@@ -128,7 +119,7 @@ spec:
                   --steps ${MAX_STEPS}
 
               # ── 10. Cleanup ─────────────────────────────────────────────
-              kill ${APIS_PID} ${ENV_PID} 2>/dev/null || true
+              kill ${APIS_PID} 2>/dev/null || true
 
               echo "=== Done: $(date) ==="
               echo "CSVs saved:"

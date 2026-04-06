@@ -1,0 +1,101 @@
+# apiVersion: v1
+# kind: Pod
+# metadata:
+#   name: cyclegan-data-pod
+# spec:
+#   nodeSelector:
+#     nautilus.io/linstor: "true"
+#     topology.kubernetes.io/region: us-west
+#   containers:
+#     - name: data-downloader
+#       image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp
+#       env:
+#         - name: REPO_PATH
+#           value: /app/pytorch-CycleGAN-and-pix2pix
+#       command:
+#         - "bash"
+#         - "-c"
+#       args:
+#         - |
+#           pip install requests tqdm gdown
+
+#           # Download horse2zebra dataset
+#           sudo wget -N http://efrosgans.eecs.berkeley.edu/cyclegan/datasets/horse2zebra.zip -O /tmp/horse2zebra.zip
+
+#           # Download 'Curl' some data from Kaggle here
+#           # For downloading from Google Drive, use gdown
+
+#           # Note: This dataset does not require preprocessing, so we could just download directly to the pvc. Below the data is unzipped an immediately recompressed for demonstration purposes
+
+#           # Extract (and run preprocessing script if you have one)
+#           sudo unzip /tmp/horse2zebra.zip -d processed_data/
+
+#           # Download compression tools
+#           sudo apt-get update && sudo apt-get install -y p7zip-full pigz pv
+
+#           # Compress processed data with multithreading and save to PVC with timestamp
+#           sudo tar -cf - -C processed_data . | pv | sudo pigz -p $(nproc) | sudo tee /data/processed_data_$(date +%m%d_%H%M).tar.gz > /dev/null
+
+#           echo "Download, extraction, and recompression complete! PVC content:"
+#           ls -lh /data/
+#           echo "You are ready to delete this pod and run training!"
+
+#           sleep infinity
+#       volumeMounts:
+#         - name: git-repo
+#           mountPath: /app
+#         - name: data-volume
+#           mountPath: /data
+#       resources:
+#         limits:
+#           memory: 12Gi
+#           cpu: "6"
+#         requests:
+#           memory: 10Gi
+#           cpu: "5"
+#   volumes:
+#     - name: git-repo
+#       emptyDir: {}
+#     - name: data-volume
+#       persistentVolumeClaim:
+#         claimName: cyclegan-data-pvc
+#   restartPolicy: Never
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reflexion-data-pod
+spec:
+  nodeSelector:
+    nautilus.io/linstor: "true"
+    topology.kubernetes.io/region: us-west
+  containers:
+    - name: data-viewer
+      image: python:3.9-slim
+      command:
+        - "bash"
+        - "-c"
+      args:
+        - |
+          echo "PVC contents:"
+          ls -lh /results/
+
+          echo "Pod ready for downloading results!"
+          echo "Run: kubectl cp reflexion-data-pod:/results ./results-local/"
+
+          sleep infinity
+      volumeMounts:
+        - name: results-volume
+          mountPath: /results
+      resources:
+        limits:
+          memory: 1Gi
+          cpu: "1"
+        requests:
+          memory: 500Mi
+          cpu: "500m"
+  volumes:
+    - name: results-volume
+      persistentVolumeClaim:
+        claimName: reflexion-data-pvc
+  restartPolicy: Never
