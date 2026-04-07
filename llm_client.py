@@ -65,7 +65,13 @@ def _extract_text(response_body: str) -> str:
             print(f"  [LLM] content in tool_calls.arguments", file=sys.stderr, flush=True)
             return args
 
-    # 3. Log full body so we can see where the tokens went
+    # 3. Reasoning model — content is in "reasoning" field, need a follow-up call
+    reasoning = msg.get("reasoning") or ""
+    if reasoning:
+        print(f"  [LLM] reasoning model detected, follow-up call", file=sys.stderr, flush=True)
+        return _REASONING_SENTINEL + reasoning
+
+    # 4. Log full body
     print(
         f"  [LLM] empty. finish={choices[0].get('finish_reason')!r} "
         f"tokens={body.get('usage', {}).get('completion_tokens')} "
@@ -74,6 +80,9 @@ def _extract_text(response_body: str) -> str:
         file=sys.stderr, flush=True,
     )
     return ""
+
+
+_REASONING_SENTINEL = "__REASONING__:"
 
 
 @retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
@@ -116,4 +125,22 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.0) -> 
     ]
     result = gpt_chat(model=MODEL, messages=messages, temperature=temperature)
     assert isinstance(result, str)
+
+    # Reasoning model returned thinking but no action — do a follow-up call
+    # to extract the actual JSON action from the reasoning
+    if result.startswith(_REASONING_SENTINEL):
+        reasoning = result[len(_REASONING_SENTINEL):]
+        followup_messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user",   content=user_prompt),
+            Message(role="assistant", content=f"<thinking>{reasoning}</thinking>"),
+            Message(role="user",   content=(
+                "Based on your reasoning above, output ONLY the JSON action now. "
+                "No thinking tags, no explanation — just the JSON."
+            )),
+        ]
+        result = gpt_chat(model=MODEL, messages=followup_messages, temperature=temperature)
+        assert isinstance(result, str)
+        print(f"  [LLM] follow-up result: {result[:100]!r}", file=sys.stderr, flush=True)
+
     return result
