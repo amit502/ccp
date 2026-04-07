@@ -30,21 +30,69 @@ def _get_client() -> OpenAI:
 
 def _chat_once(client, model: str, messages: list, temperature: float = 0.0) -> str:
     """
-    Single chat completion call using streaming to work around the ellm endpoint
-    returning empty content on non-streaming requests.
+    Single chat completion — tries streaming first, falls back to non-streaming.
+    Also checks tool_calls field in case the model routes output there.
     """
-    chunks = []
-    with client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        stream=True,
-    ) as stream:
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if delta:
-                chunks.append(delta)
-    return "".join(chunks)
+    import json as _json, sys
+
+    # Try streaming first
+    try:
+        chunks = []
+        tool_chunks = []
+        with client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            stream=True,
+        ) as stream:
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    chunks.append(delta.content)
+                # Some endpoints put JSON in tool_calls even without tools defined
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        if hasattr(tc, "function"):
+                            if tc.function.name:
+                                tool_chunks.append(tc.function.name)
+                            if tc.function.arguments:
+                                tool_chunks.append(tc.function.arguments)
+
+        result = "".join(chunks)
+        if result:
+            return result
+        # Content empty but tool_call had data — reconstruct as JSON
+        if tool_chunks:
+            raw = "".join(tool_chunks)
+            print(f"  [LLM] content empty, got tool_call data: {raw[:100]!r}", file=sys.stderr)
+            return raw
+    except Exception as e:
+        print(f"  [LLM] streaming error: {e}", file=sys.stderr)
+
+    # Fallback: non-streaming
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+        )
+        choice = completion.choices[0]
+        if choice.message.content:
+            return choice.message.content
+        # Check tool_calls on non-streaming response too
+        if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
+            tc = choice.message.tool_calls[0]
+            raw = tc.function.arguments or ""
+            print(f"  [LLM] non-stream tool_call: {tc.function.name} args={raw[:80]!r}", file=sys.stderr)
+            return raw
+        # Log full response for diagnosis
+        print(f"  [LLM] both empty. choice={choice!r}", file=sys.stderr)
+        return ""
+    except Exception as e:
+        print(f"  [LLM] non-streaming error: {e}", file=sys.stderr)
+        return ""
 
 
 @retry(wait=wait_random_exponential(min=1, max=180), stop=stop_after_attempt(6))
