@@ -151,17 +151,31 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
         f"  {t.name}: {t.description}" for t in tools
     )
 
-    # Build conversation history
+    # Build conversation history — include tool results for context
     history_parts = []
     for m in state["messages"]:
         if isinstance(m, SystemMessage):
-            pass  # system prompt sent separately
+            pass
         elif isinstance(m, HumanMessage):
             history_parts.append(f"User: {m.content}")
         elif isinstance(m, AIMessage):
-            history_parts.append(f"Assistant: {m.content}")
-        elif hasattr(m, "content"):
-            history_parts.append(f"Tool result: {m.content}")
+            if m.content:
+                history_parts.append(f"Assistant: {m.content}")
+            # Show tool calls made
+            for tc in (getattr(m, "tool_calls", None) or []):
+                history_parts.append(
+                    f"Tool called: {tc.get('name','?')} with {tc.get('args',{})}"
+                )
+        else:
+            # ToolMessage — show the result
+            content = getattr(m, "content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    c.get("text", "") if isinstance(c, dict) else str(c)
+                    for c in content
+                )
+            if content:
+                history_parts.append(f"Tool result: {str(content)[:500]}")
     history = "\n".join(history_parts)
 
     # Show only tool names + first sentence of description to save context
@@ -220,11 +234,10 @@ Goal: {{goal}}"""
         traceback.print_exc()
         raw = ""
 
-    # Debug first step
-    if state["step"] == 0:
-        print(f"  [LLM step=0] {raw[:150]!r}", flush=True)
+    # Always log LLM output so we can see what's happening
+    print(f"  [LLM s={state['step']}] {raw[:200]!r}", flush=True)
 
-    # Parse JSON response
+    # Parse JSON response — handle multiple common formats
     done = False
     final_answer = None
     tool_calls = []
@@ -234,23 +247,50 @@ Goal: {{goal}}"""
         parsed = json.loads(clean)
         action = parsed.get("action", "")
 
-        if action == "finish":
+        # Detect finish
+        if (action == "finish"
+                or parsed.get("answer") is not None
+                or "FINAL ANSWER" in str(parsed.get("answer", ""))):
             done         = True
-            final_answer = parsed.get("answer", "")
-        elif action == "tool_call":
-            tool_calls = [{
-                "name": parsed["tool"],
-                "args": parsed.get("input", {}),
-                "id":   f"call_{state['step']}",
-                "type": "tool_call",
-            }]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        # Fallback: check for FINAL ANSWER in raw text
+            final_answer = str(parsed.get("answer", parsed.get("result", "")))
+
+        # Detect tool call — handle multiple naming conventions
+        elif action in ("tool_call", "call_tool", "use_tool") or              "tool" in parsed or "function" in parsed or "name" in parsed:
+            # Extract tool name
+            tool_name = (parsed.get("tool")
+                         or parsed.get("function")
+                         or parsed.get("name")
+                         or "")
+            # Extract args
+            tool_args = (parsed.get("input")
+                         or parsed.get("args")
+                         or parsed.get("arguments")
+                         or parsed.get("parameters")
+                         or {})
+            if isinstance(tool_args, str):
+                try:
+                    tool_args = json.loads(tool_args)
+                except Exception:
+                    tool_args = {}
+            if tool_name:
+                tool_calls = [{
+                    "name": tool_name,
+                    "args": tool_args,
+                    "id":   f"call_{state['step']}",
+                    "type": "tool_call",
+                }]
+            else:
+                print(f"  [LLM] no tool name found in: {parsed}", flush=True)
+        else:
+            print(f"  [LLM] unrecognized JSON: {parsed}", flush=True)
+
+    except (json.JSONDecodeError, TypeError):
+        # Plain-text fallback
         if "FINAL ANSWER:" in raw:
             done         = True
             final_answer = raw.split("FINAL ANSWER:", 1)[1].strip()
         else:
-            print(f"  [LLM] parse failed: {raw[:100]!r}", flush=True)
+            print(f"  [LLM] not JSON: {raw[:150]!r}", flush=True)
 
     messages = state["messages"] or [
         SystemMessage(content=system),
