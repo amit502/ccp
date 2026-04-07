@@ -149,73 +149,84 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
         f"  {t.name}: {t.description}" for t in tools
     )
 
-    # Build conversation history — include tool results for context
-    history_parts = []
-    for m in state["messages"]:
-        if isinstance(m, SystemMessage):
-            pass
-        elif isinstance(m, HumanMessage):
-            history_parts.append(f"User: {m.content}")
-        elif isinstance(m, AIMessage):
-            if m.content:
-                history_parts.append(f"Assistant: {m.content}")
-            # Show tool calls made
-            for tc in (getattr(m, "tool_calls", None) or []):
-                history_parts.append(
-                    f"Tool called: {tc.get('name','?')} with {tc.get('args',{})}"
-                )
-        else:
-            # ToolMessage — show the result
-            content = getattr(m, "content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    c.get("text", "") if isinstance(c, dict) else str(c)
-                    for c in content
-                )
-            if content:
-                history_parts.append(f"Tool result: {str(content)[:500]}")
-    history = "\n".join(history_parts)
-
-    # Show only tool names + first sentence of description to save context
+    # Tool list (trimmed)
     tool_summary = "\n".join(
         f"  {t.name}: {t.description.split('.')[0]}" for t in tools[:60]
     )
     if len(tools) > 60:
         tool_summary += f"\n  ... and {len(tools)-60} more tools"
 
-    system = f"""You are an autonomous agent completing tasks by calling real API tools.
+    system_text = f"""You are an autonomous agent completing tasks by calling real API tools.
 
-RULES — follow these exactly:
+RULES:
 1. You are in a REAL environment. Tools work. Call them.
-2. NEVER say "I cannot", "tool execution not possible", or ask the user for info.
+2. NEVER say "I cannot" or ask the user for info — use tools.
 3. Start by calling supervisor__show_active_task to get full task details.
 4. Call tools step by step until the task is fully done.
-5. Only call {{"action":"finish",...}} AFTER you have actually completed all actions.
-6. Respond ONLY with JSON — no prose, no explanation.
+5. Only output {{"action":"finish",...}} AFTER completing ALL required actions.
+6. Respond ONLY with JSON.
 
-TOOL CALL format:
-{{"action": "tool_call", "tool": "<exact_tool_name>", "input": {{"<param>": "<value>"}}}}
-
-FINISH format (only after completing ALL required actions):
-{{"action": "finish", "answer": "<what you did>"}}
+TOOL CALL: {{"action":"tool_call","tool":"<name>","input":{{<params>}}}}
+FINISH:    {{"action":"finish","answer":"<what you did>"}}
 
 Available tools:
 {tool_summary}
 
-Goal: {{goal}}"""
+Goal: {state["goal"]}"""
 
-    # Inject goal into system prompt
-    system = system.replace("{goal}", state["goal"])
+    # Build proper messages array — each tool call and result as its own turn
+    # This is what the reasoning model needs to track conversation state
+    llm_messages = [{"role": "system", "content": system_text}]
 
-    # User message: history of tool calls so far, or initial prompt
-    user = history.strip() if history.strip() else "Begin. Call the first tool now."
+    if not state["messages"]:
+        llm_messages.append({"role": "user", "content": "Begin. Call the first tool now."})
+    else:
+        for m in state["messages"]:
+            if isinstance(m, SystemMessage):
+                continue
+            elif isinstance(m, HumanMessage):
+                llm_messages.append({"role": "user", "content": m.content})
+            elif isinstance(m, AIMessage):
+                # assistant turn — show what it called
+                parts = []
+                if m.content:
+                    parts.append(m.content)
+                for tc in (getattr(m, "tool_calls", None) or []):
+                    parts.append(json.dumps({
+                        "action": "tool_call",
+                        "tool":   tc.get("name", ""),
+                        "input":  tc.get("args", {}),
+                    }))
+                llm_messages.append({
+                    "role":    "assistant",
+                    "content": "\n".join(parts) or "(called tool)",
+                })
+            else:
+                # ToolMessage — show result as a user turn
+                content = getattr(m, "content", "") or ""
+                if isinstance(content, list):
+                    content = " ".join(
+                        c.get("text", "") if isinstance(c, dict) else str(c)
+                        for c in content
+                    )
+                content = str(content)[:800]
+                if content:
+                    llm_messages.append({
+                        "role":    "user",
+                        "content": f"Tool result: {content}",
+                    })
 
-    # Call LLM via llm_client (handles streaming + empty-content fallback)
+    # Call LLM with full conversation history
     try:
-        from llm_client import call_llm as _call_llm
+        from llm_client import gpt_chat as _gpt_chat, Message as _Msg
+        # Convert to Message dataclasses for gpt_chat
+        msgs = [_Msg(role=m["role"], content=m["content"]) for m in llm_messages]
         raw = await asyncio.get_event_loop().run_in_executor(
-            None, _call_llm, system, user
+            None,
+            lambda: _gpt_chat(model=None, messages=msgs, temperature=0.0),  # model unused
         )
+        if not isinstance(raw, str):
+            raw = ""
     except Exception as e:
         import traceback
         print(f"  [LLM] error: {type(e).__name__}: {e}", flush=True)

@@ -108,6 +108,8 @@ def gpt_chat(
     temperature: float = 0.0,
     num_comps:   int   = 1,
 ) -> Union[List[str], str]:
+    if model is None:
+        model = MODEL
     formatted = [dataclasses.asdict(m) for m in messages]
     try:
         if num_comps == 1:
