@@ -144,8 +144,6 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
     Falls back to regex parsing if JSON is malformed.
     """
     import json, re
-    from llm_client import _get_client, MODEL
-
     # Build tool list for the prompt
     tool_list = "\n".join(
         f"  {t.name}: {t.description}" for t in tools
@@ -212,25 +210,12 @@ Goal: {{goal}}"""
     # User message: history of tool calls so far, or initial prompt
     user = history.strip() if history.strip() else "Begin. Call the first tool now."
 
-    # Call LLM with JSON mode
+    # Call LLM via llm_client (handles streaming + empty-content fallback)
     try:
-        client = _get_client()
-        completion = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            temperature=0.0,
+        from llm_client import call_llm as _call_llm
+        raw = await asyncio.get_event_loop().run_in_executor(
+            None, _call_llm, system, user
         )
-        raw = completion.choices[0].message.content or ""
-        if not raw:
-            print(
-                f"  [LLM] empty content. "
-                f"finish_reason={completion.choices[0].finish_reason!r} "
-                f"usage={completion.usage}",
-                flush=True,
-            )
     except Exception as e:
         import traceback
         print(f"  [LLM] error: {type(e).__name__}: {e}", flush=True)
