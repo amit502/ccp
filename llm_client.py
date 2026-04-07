@@ -28,6 +28,25 @@ def _get_client() -> OpenAI:
     )
 
 
+def _chat_once(client, model: str, messages: list, temperature: float = 0.0) -> str:
+    """
+    Single chat completion call using streaming to work around the ellm endpoint
+    returning empty content on non-streaming requests.
+    """
+    chunks = []
+    with client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        stream=True,
+    ) as stream:
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                chunks.append(delta)
+    return "".join(chunks)
+
+
 @retry(wait=wait_random_exponential(min=1, max=180), stop=stop_after_attempt(6))
 def gpt_chat(
     model:       str,
@@ -40,24 +59,10 @@ def gpt_chat(
     formatted = [dataclasses.asdict(m) for m in messages]
     try:
         if num_comps == 1:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=formatted,
-                temperature=0.0,
-                # max_tokens=max_tokens,
-            )
-            return completion.choices[0].message.content or ""
+            return _chat_once(client, model, formatted, temperature=0.0)
         else:
-            results = []
-            for _ in range(num_comps):
-                completion = client.chat.completions.create(
-                    model=model,
-                    messages=formatted,
-                    temperature=0.2,
-                    # max_tokens=max_tokens,
-                )
-                results.append(completion.choices[0].message.content or "")
-            return results
+            return [_chat_once(client, model, formatted, temperature=0.2)
+                    for _ in range(num_comps)]
     except Exception as e:
         print(f"gpt_chat error: {e}")
         return "" if num_comps == 1 else [""] * num_comps

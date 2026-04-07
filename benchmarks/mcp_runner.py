@@ -120,28 +120,34 @@ async def _run_one_task(
 
 
 async def _run_all_tasks_async(
-    tasks:           List[Any],
-    manager_factory: Callable[[], Any],
-    server_configs:  Dict[str, Any],
-    max_steps:       int,
-    score_fn:        Callable,
-    verbose:         bool,
-    appworld_root:   str = "",
-    appworld_url:    str = "",
+    tasks:              List[Any],
+    manager_factory:    Callable[[], Any],
+    server_configs:     Dict[str, Any],
+    max_steps:          int,
+    score_fn:           Callable,
+    verbose:            bool,
+    appworld_root:      str  = "",
+    appworld_url:       str  = "",
+    cached_tools:       Any  = None,
+    cached_interceptor: Any  = None,
 ) -> List[TaskResult]:
     """
     Run all tasks sequentially with ONE shared MCP client.
-    The client (and its subprocess) is created once — OpenAPI specs fetched once.
-    The MutableInterceptor's manager is swapped per task.
+    If cached_tools/interceptor are provided (pre-fetched in __init__),
+    uses those directly — OpenAPI specs are NOT re-fetched.
     """
-    from ..mcp_agent import build_shared_client, run_agent_with_tools
+    from ..mcp_agent import build_shared_client, run_agent_with_tools, MutableInterceptor
     from .appworld_runner import _seed_task, _reset_task, APPWORLD_ROOT, APPWORLD_URL
 
     _root = appworld_root or APPWORLD_ROOT
     _url  = appworld_url  or APPWORLD_URL
 
-    # Build shared client once — fetches tools/OpenAPI specs once for all tasks
-    _client, tools, interceptor = await build_shared_client(server_configs)
+    if cached_tools is not None and cached_interceptor is not None:
+        tools       = cached_tools
+        interceptor = cached_interceptor
+        print(f"  [MCP] Using {len(tools)} cached tools (no re-fetch)", flush=True)
+    else:
+        _client, tools, interceptor = await build_shared_client(server_configs)
 
     results = []
     for task in tasks:
@@ -236,6 +242,12 @@ class AppWorldMCPRunner:
         self._tasks = _load_tasks_from_fs(APPWORLD_ROOT, split, max_tasks)
         print(f"[AppWorldMCPRunner] Loaded {len(self._tasks)} tasks from {APPWORLD_ROOT}")
 
+        # Pre-fetch MCP tools once — reused across all 6 method evaluate() calls
+        # This avoids re-fetching 463 OpenAPI specs per method run
+        self._tools       = None
+        self._interceptor = None
+        self._prefetch_tools()
+
     def _server_configs(self) -> Dict[str, Any]:
         return {
             "appworld": {
@@ -245,6 +257,23 @@ class AppWorldMCPRunner:
                 "transport": "stdio",
             }
         }
+
+    def _prefetch_tools(self) -> None:
+        """Fetch MCP tools once and cache — reused for all 6 method runs."""
+        import asyncio
+        from ..mcp_agent import build_shared_client
+
+        async def _fetch():
+            _client, tools, interceptor = await build_shared_client(self._server_configs())
+            return tools, interceptor
+
+        try:
+            tools, interceptor = asyncio.run(_fetch())
+            self._tools       = tools
+            self._interceptor = interceptor
+            print(f"[AppWorldMCPRunner] Pre-fetched {len(tools)} tools (cached for all methods)")
+        except Exception as e:
+            print(f"[AppWorldMCPRunner] Tool prefetch failed: {e} — will fetch per run")
 
     def evaluate(
         self,
@@ -263,6 +292,8 @@ class AppWorldMCPRunner:
                 max_steps=self.max_steps,
                 score_fn=self._score,
                 verbose=verbose,
+                cached_tools=self._tools,
+                cached_interceptor=self._interceptor,
             )
         )
         for r in results:
