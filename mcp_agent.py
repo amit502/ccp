@@ -218,15 +218,31 @@ Goal: {state["goal"]}"""
 
     # Call LLM with full conversation history
     try:
-        from llm_client import gpt_chat as _gpt_chat, Message as _Msg
-        # Convert to Message dataclasses for gpt_chat
-        msgs = [_Msg(role=m["role"], content=m["content"]) for m in llm_messages]
+        from llm_client import _call_raw as _llm_raw, _REASONING_SENTINEL
+        formatted = [{"role": m["role"], "content": m["content"]} for m in llm_messages]
         raw = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: _gpt_chat(model=None, messages=msgs, temperature=0.0),  # model unused
+            None, _llm_raw, formatted, 0.0
         )
         if not isinstance(raw, str):
             raw = ""
+
+        # Reasoning model — do follow-up to get actual JSON action
+        if raw.startswith(_REASONING_SENTINEL):
+            reasoning = raw[len(_REASONING_SENTINEL):]
+            follow_msgs = formatted + [
+                {"role": "assistant", "content": f"<thinking>{reasoning}</thinking>"},
+                {"role": "user", "content":
+                    "Based on your reasoning above, output ONLY the JSON action now. "
+                    "No thinking tags — just the JSON object."},
+            ]
+            raw = await asyncio.get_event_loop().run_in_executor(
+                None, _llm_raw, follow_msgs, 0.0
+            )
+            if not isinstance(raw, str):
+                raw = ""
+            # Strip any remaining sentinel
+            if raw.startswith(_REASONING_SENTINEL):
+                raw = ""
     except Exception as e:
         import traceback
         print(f"  [LLM] error: {type(e).__name__}: {e}", flush=True)
@@ -292,8 +308,8 @@ Goal: {state["goal"]}"""
             print(f"  [LLM] not JSON: {raw[:150]!r}", flush=True)
 
     messages = state["messages"] or [
-        SystemMessage(content=system),
-        HumanMessage(content=user),
+        SystemMessage(content=system_text),
+        HumanMessage(content='Begin. Call the first tool now.'),
     ]
     response = AIMessage(content=raw, tool_calls=tool_calls)
 
