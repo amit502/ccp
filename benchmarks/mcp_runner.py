@@ -165,6 +165,19 @@ async def _run_all_tasks_async(
         interceptor.set_manager(manager)
 
         t0 = time.time()
+        peak_tokens_seen = [0]  # track max tokens via mutable list
+
+        # Wrap manager to track peak tokens after each compression event
+        original_add = manager.add_observation
+        def tracking_add(*args, **kwargs):
+            elem = original_add(*args, **kwargs)
+            ctx_now = manager.get_compressed_context()
+            toks = ctx_now.total_tokens()
+            if toks > peak_tokens_seen[0]:
+                peak_tokens_seen[0] = toks
+            return elem
+        manager.add_observation = tracking_add
+
         try:
             final_state = await run_agent_with_tools(
                 goal=task.goal,
@@ -186,15 +199,18 @@ async def _run_all_tasks_async(
         if _root and _url:
             _reset_task(task.id, _url)
 
-        ctx   = manager.get_compressed_context()
+        ctx          = manager.get_compressed_context()
+        final_tokens = ctx.total_tokens()
+        peak_tokens  = max(peak_tokens_seen[0], final_tokens)
+
         result = TaskResult(
             task_id=task.id,
             goal=task.goal,
             success=success,
             steps=len(ctx.elements),
             final_answer=final_answer,
-            peak_tokens=ctx.total_tokens(),
-            total_tokens=ctx.total_tokens(),
+            peak_tokens=peak_tokens,
+            total_tokens=final_tokens,
             time_elapsed=time.time() - t0,
             ccp_stats=manager.get_stats_log(),
             method="",

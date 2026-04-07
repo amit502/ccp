@@ -159,16 +159,16 @@ def _reset_task(task_id: str, appworld_url: str) -> None:
 
 
 def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
-    """
-    Evaluate task using AppWorld's evaluator run as a subprocess.
-    Uses the appworld venv Python so pydantic v1 is available.
-    Falls back to agent done-flag if evaluation fails.
-    """
+    """Evaluate via eval_task.py subprocess in the appworld venv."""
     import subprocess, json as _json
     eval_script = str(Path(__file__).parent.parent / "eval_task.py")
-    venv_python = str(Path(APPWORLD_ROOT_VENV) / "bin" / "python3")
+    venv_python  = str(Path(APPWORLD_ROOT_VENV) / "bin" / "python3")
 
-    if not Path(eval_script).exists() or not Path(venv_python).exists():
+    if not Path(eval_script).exists():
+        print(f"  [eval] eval_task.py not found at {eval_script}", flush=True)
+        return 1.0 if final_state.get("done") else 0.0
+    if not Path(venv_python).exists():
+        print(f"  [eval] venv python not found at {venv_python}", flush=True)
         return 1.0 if final_state.get("done") else 0.0
 
     try:
@@ -177,18 +177,27 @@ def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
             capture_output=True, text=True, timeout=60,
         )
         stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        if stderr:
+            print(f"  [eval] stderr: {stderr[:300]}", flush=True)
         if stdout:
-            # Find the last line that looks like JSON
             for line in reversed(stdout.splitlines()):
                 line = line.strip()
                 if line.startswith("{"):
                     data = _json.loads(line)
-                    return 1.0 if data.get("success") else 0.0
-        if result.stderr:
-            print(f"  [eval] {result.stderr[:300]}", flush=True)
+                    score = 1.0 if data.get("success") else 0.0
+                    print(f"  [eval] {task_id}: success={data.get("success")} "
+                          f"pass={data.get("pass_count")}/{data.get("num_tests")}", flush=True)
+                    return score
+            print(f"  [eval] no JSON in stdout: {stdout[:200]}", flush=True)
+        else:
+            print(f"  [eval] empty stdout (rc={result.returncode})", flush=True)
     except Exception as e:
-        print(f"  [eval] error: {e}")
-    return 1.0 if final_state.get("done") else 0.0
+        print(f"  [eval] exception: {e}", flush=True)
+
+    done = final_state.get("done", False)
+    print(f"  [eval] fallback done={done}", flush=True)
+    return 1.0 if done else 0.0
 
 
 # ---------------------------------------------------------------------------
