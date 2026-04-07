@@ -1,18 +1,21 @@
 """
 llm_client.py
-Nautilus-hosted LLM client using OpenAI-compatible endpoint.
+Direct HTTP call to Nautilus ellm endpoint — bypasses OpenAI client parsing.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
+import sys
 from typing import List, Union
 
-from openai import OpenAI
+import requests
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
-MODEL = "gpt-oss"
+BASE_URL = "https://ellm.nrp-nautilus.io/v1"
+MODEL    = "gpt-oss"
 
 
 @dataclasses.dataclass
@@ -21,78 +24,76 @@ class Message:
     content: str
 
 
-def _get_client() -> OpenAI:
+def _get_client():
+    """Keep for backward compat — not used in hot path."""
+    from openai import OpenAI
     return OpenAI(
-        base_url="https://ellm.nrp-nautilus.io/v1",
+        base_url=BASE_URL,
         api_key=os.environ["OPENAI_API_KEY"],
     )
 
 
-def _chat_once(client, model: str, messages: list, temperature: float = 0.0) -> str:
+def _raw_chat(messages: list, temperature: float = 0.0) -> str:
     """
-    Single chat completion — tries streaming first, falls back to non-streaming.
-    Also checks tool_calls field in case the model routes output there.
+    POST directly to the ellm endpoint and return content string.
+    Logs the full raw JSON on first call so we can see exactly what's returned.
     """
-    import json as _json, sys
+    payload = {
+        "model":       MODEL,
+        "messages":    messages,
+        "temperature": temperature,
+    }
+    headers = {
+        "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+        "Content-Type":  "application/json",
+    }
+    r = requests.post(
+        f"{BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=120,
+    )
+    r.raise_for_status()
 
-    # Try streaming first
-    try:
-        chunks = []
-        tool_chunks = []
-        with client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            stream=True,
-        ) as stream:
-            for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    chunks.append(delta.content)
-                # Some endpoints put JSON in tool_calls even without tools defined
-                if hasattr(delta, "tool_calls") and delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        if hasattr(tc, "function"):
-                            if tc.function.name:
-                                tool_chunks.append(tc.function.name)
-                            if tc.function.arguments:
-                                tool_chunks.append(tc.function.arguments)
+    body = r.json()
 
-        result = "".join(chunks)
-        if result:
-            return result
-        # Content empty but tool_call had data — reconstruct as JSON
-        if tool_chunks:
-            raw = "".join(tool_chunks)
-            print(f"  [LLM] content empty, got tool_call data: {raw[:100]!r}", file=sys.stderr)
-            return raw
-    except Exception as e:
-        print(f"  [LLM] streaming error: {e}", file=sys.stderr)
+    # Log raw response once for diagnosis
+    if os.environ.get("LLM_DEBUG", "0") == "1":
+        print(f"  [LLM raw] {json.dumps(body)[:400]}", file=sys.stderr, flush=True)
 
-    # Fallback: non-streaming
-    try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-        )
-        choice = completion.choices[0]
-        if choice.message.content:
-            return choice.message.content
-        # Check tool_calls on non-streaming response too
-        if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
-            tc = choice.message.tool_calls[0]
-            raw = tc.function.arguments or ""
-            print(f"  [LLM] non-stream tool_call: {tc.function.name} args={raw[:80]!r}", file=sys.stderr)
-            return raw
-        # Log full response for diagnosis
-        print(f"  [LLM] both empty. choice={choice!r}", file=sys.stderr)
+    # Standard path
+    choices = body.get("choices", [])
+    if not choices:
+        print(f"  [LLM] no choices in response: {json.dumps(body)[:200]}", file=sys.stderr, flush=True)
         return ""
-    except Exception as e:
-        print(f"  [LLM] non-streaming error: {e}", file=sys.stderr)
-        return ""
+
+    choice  = choices[0]
+    message = choice.get("message", {})
+    content = message.get("content") or ""
+
+    if content:
+        return content
+
+    # content empty — check other fields
+    # 1. tool_calls (model routing to function calling)
+    tool_calls = message.get("tool_calls") or []
+    if tool_calls:
+        tc = tool_calls[0]
+        fn = tc.get("function", {})
+        raw = fn.get("arguments", "")
+        print(f"  [LLM] content empty, tool_call: {fn.get('name')} args={raw[:80]!r}", file=sys.stderr, flush=True)
+        return raw
+
+    # 2. Log full message so we know where the tokens went
+    print(
+        f"  [LLM] empty content. finish={choice.get('finish_reason')!r} "
+        f"tokens={body.get('usage',{}).get('completion_tokens')} "
+        f"message_keys={list(message.keys())}",
+        file=sys.stderr, flush=True,
+    )
+    # Print full raw for diagnosis on first empty
+    print(f"  [LLM raw full] {json.dumps(body)[:600]}", file=sys.stderr, flush=True)
+    return ""
 
 
 @retry(wait=wait_random_exponential(min=1, max=180), stop=stop_after_attempt(6))
@@ -103,16 +104,14 @@ def gpt_chat(
     temperature: float = 0.0,
     num_comps:   int   = 1,
 ) -> Union[List[str], str]:
-    client    = _get_client()
     formatted = [dataclasses.asdict(m) for m in messages]
     try:
         if num_comps == 1:
-            return _chat_once(client, model, formatted, temperature=0.0)
+            return _raw_chat(formatted, temperature=0.0)
         else:
-            return [_chat_once(client, model, formatted, temperature=0.2)
-                    for _ in range(num_comps)]
+            return [_raw_chat(formatted, temperature=0.2) for _ in range(num_comps)]
     except Exception as e:
-        print(f"gpt_chat error: {e}")
+        print(f"gpt_chat error: {e}", file=sys.stderr)
         return "" if num_comps == 1 else [""] * num_comps
 
 

@@ -31,6 +31,8 @@ spec:
               value: /app/appworld-env
             - name: PYTHONPATH
               value: /app
+            - name: LLM_DEBUG
+              value: "1"
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
