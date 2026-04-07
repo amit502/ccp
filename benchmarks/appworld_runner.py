@@ -186,8 +186,8 @@ def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
                 if line.startswith("{"):
                     data = _json.loads(line)
                     score = 1.0 if data.get("success") else 0.0
-                    print(f"  [eval] {task_id}: success={data.get("success")} "
-                          f"pass={data.get("pass_count")}/{data.get("num_tests")}", flush=True)
+                    sc = data.get("success"); pc = data.get("pass_count"); nt = data.get("num_tests")
+                    print(f"  [eval] {task_id}: success={sc} pass={pc}/{nt}", flush=True)
                     return score
             print(f"  [eval] no JSON in stdout: {stdout[:200]}", flush=True)
         else:
