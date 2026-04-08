@@ -17,8 +17,17 @@ task_id       = sys.argv[1]
 appworld_root = sys.argv[2]
 
 try:
-    from appworld.common.path_store import path_store
-    path_store.set_root(appworld_root)
+    # from appworld.common.path_store import path_store
+    # # path_store.set_root(appworld_root)
+    # path_store.root = appworld_root
+    from appworld.common.path_store import path_store, PathStore
+
+    if hasattr(path_store, "set_root"):
+        path_store.set_root(appworld_root)
+    elif hasattr(path_store, "root"):
+        path_store.root = appworld_root
+    else:
+        path_store = PathStore(appworld_root)
 
     # Suppress any stdout from evaluator
     import io
