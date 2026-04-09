@@ -1,41 +1,34 @@
 #!/usr/bin/env python3
 """
 Standalone AppWorld task evaluator — runs inside the appworld venv.
-Usage: python eval_task.py <task_id> <appworld_root>
-Outputs ONLY JSON to stdout: {"success": true/false, "pass_count": N, "num_tests": N}
-All other output goes to stderr.
+Usage: python eval_task.py <task_id> <appworld_root> [experiment_name]
+Reads task output DBs from:
+  {appworld_root}/experiments/outputs/{experiment_name}/tasks/{task_id}/dbs/
+Outputs ONLY JSON to stdout.
 """
-import sys
-import json
-import os
+import sys, json, os, io
 
-# Redirect all prints/warnings to stderr so stdout stays clean JSON
-import warnings
-warnings.filterwarnings("ignore")
-
-task_id       = sys.argv[1]
-appworld_root = sys.argv[2]
+task_id         = sys.argv[1]
+appworld_root   = sys.argv[2]
+experiment_name = sys.argv[3] if len(sys.argv) > 3 else "ccp"
 
 try:
-    # from appworld.common.path_store import path_store
-    # # path_store.set_root(appworld_root)
-    # path_store.root = appworld_root
-    from appworld.common.path_store import path_store, PathStore
+    os.environ["APPWORLD_ROOT"] = appworld_root
 
-    if hasattr(path_store, "set_root"):
-        path_store.set_root(appworld_root)
-    elif hasattr(path_store, "root"):
-        path_store.root = appworld_root
-    else:
-        path_store = PathStore(appworld_root)
+    from appworld.common.path_store import path_store
+    path_store.update_root(appworld_root)
 
-    # Suppress any stdout from evaluator
-    import io
+    # Suppress stdout from evaluator internals
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
 
     from appworld.evaluator import evaluate_task
-    result = evaluate_task(task_id=task_id, suppress_errors=True, save_report=False)
+    result = evaluate_task(
+        task_id=task_id,
+        experiment_name=experiment_name,
+        suppress_errors=True,
+        save_report=False,
+    )
 
     sys.stdout = old_stdout
 
@@ -46,6 +39,9 @@ try:
     }))
 
 except Exception as e:
-    sys.stdout = sys.__stdout__  # restore in case of error
+    try:
+        sys.stdout = sys.__stdout__
+    except Exception:
+        pass
     print(json.dumps({"success": False, "error": str(e)}))
     print(f"[eval_task] error: {e}", file=sys.stderr)

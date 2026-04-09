@@ -146,6 +146,37 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
         return False
 
 
+def _save_task(task_id: str, appworld_root: str, appworld_url: str,
+               experiment_name: str = "ccp") -> bool:
+    """
+    Save in-memory task DB state to disk so the evaluator can read it.
+    AppWorld evaluator reads from:
+      {appworld_root}/experiments/outputs/{experiment_name}/tasks/{task_id}/dbs/
+    """
+    out_dbs_path = str(
+        Path(appworld_root) / "experiments" / "outputs" / experiment_name / "tasks" / task_id / "dbs"
+    )
+    Path(out_dbs_path).mkdir(parents=True, exist_ok=True)
+    try:
+        r = requests.post(
+            f"{appworld_url}/dbs/save",
+            json={
+                "from_db_home_path": f":memory:task_input-{task_id}",
+                "to_db_home_path":   out_dbs_path,
+                "format":            "full",
+                "delete_if_exists":  True,
+            },
+            timeout=30,
+        )
+        if r.status_code not in (200, 201):
+            print(f"  [save] /dbs/save failed ({r.status_code}): {r.text[:100]}", flush=True)
+            return False
+        return True
+    except Exception as e:
+        print(f"  [save] error: {e}", flush=True)
+        return False
+
+
 def _reset_task(task_id: str, appworld_url: str) -> None:
     """Clear task databases from memory."""
     try:
@@ -170,6 +201,9 @@ def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
     if not Path(venv_python).exists():
         print(f"  [eval] venv python not found at {venv_python}", flush=True)
         return 1.0 if final_state.get("done") else 0.0
+
+    # Save in-memory DB state to disk before evaluating
+    _save_task(task_id, APPWORLD_ROOT, APPWORLD_URL)
 
     try:
         result = subprocess.run(

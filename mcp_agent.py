@@ -159,14 +159,16 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
     system_text = f"""You are an autonomous agent completing tasks by calling real API tools.
 
 RULES:
-1. You are in a REAL environment. Tools work. Call them.
-2. NEVER say "I cannot" or ask the user for info — use tools.
-3. Start by calling supervisor__show_active_task to get full task details.
-4. Call tools step by step until the task is fully done.
-5. Only output {{"action":"finish",...}} AFTER completing ALL required actions.
-6. Respond ONLY with JSON.
+1. You are in a REAL environment. All tools work. Call them.
+2. NEVER say "I cannot", "unable to locate", or ask the user for info.
+3. ALWAYS follow this sequence:
+   a. Call supervisor__show_active_task_active_task_get to get task details + credentials
+   b. Authenticate with each required app using its __authenticate tool and the supervisor credentials
+   c. Call tools to complete the task
+   d. Only finish after ALL actions are verified done
+4. Respond ONLY with a JSON object — no prose.
 
-TOOL CALL: {{"action":"tool_call","tool":"<name>","input":{{<params>}}}}
+TOOL CALL: {{"action":"tool_call","tool":"<exact_tool_name>","input":{{<params>}}}}
 FINISH:    {{"action":"finish","answer":"<what you did>"}}
 
 Available tools:

@@ -22,7 +22,7 @@ spec:
             - name: EXPERIMENT
               value: appworld_all
             - name: MAX_TASKS
-              value: "50"
+              value: "5"
             - name: MAX_STEPS
               value: "40"
             - name: APPWORLD_URL
