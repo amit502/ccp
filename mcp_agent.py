@@ -213,9 +213,11 @@ Goal: {state["goal"]}"""
                     )
                 content = str(content)[:800]
                 if content:
+                    # Log tool results so we can debug agent behavior
+                    print(f"  [tool result] {content[:150]}", flush=True)
                     llm_messages.append({
                         "role":    "user",
-                        "content": f"Tool result: {content}",
+                        "content": f"Tool result: {content}\nIf this shows an error, fix it before proceeding.",
                     })
 
     # Call LLM with full conversation history
@@ -361,6 +363,8 @@ class MutableInterceptor:
             for block in result.content:
                 if hasattr(block, "text"):
                     raw_output += block.text
+
+        print(f"  [interceptor] tool={request.name} output={raw_output[:80]!r}", flush=True)
 
         element = self.manager.add_observation(
             tool_name=request.name,
