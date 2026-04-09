@@ -165,6 +165,7 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
                 "to_db_home_path":   out_dbs_path,
                 "format":            "full",
                 "delete_if_exists":  True,
+                "app_names":         [],
             },
             timeout=30,
         )

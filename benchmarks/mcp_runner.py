@@ -65,59 +65,50 @@ NQ_MCP_SERVER_SCRIPT   = str(Path(__file__).parent.parent / "nq_mcp_server.py")
 async def _run_one_task(
     task_id:        str,
     goal:           str,
-    manager:        Any,             # already-constructed context manager
+    manager:        Any,
     server_configs: Dict[str, Any],
     max_steps:      int,
-    score_fn:       Callable[[str, Any], float],   # (task_id, final_state) → float
+    score_fn:       Callable[[str, Any], float],
     verbose:        bool,
+    cached_tools:   Any = None,
+    interceptor:    Any = None,
 ) -> TaskResult:
-    """
-    Run one task through real MCP servers with the given context manager.
-    The manager (CCP, FIFO, ACON, NoCompression, etc.) is passed directly
-    to build_mcp_agent which wires it as a GenericToolCallInterceptor.
-    """
-    from ..mcp_agent import build_mcp_agent
+    """Run one task. Uses cached_tools/interceptor if provided, else builds new client."""
+    from ..mcp_agent import build_mcp_agent, run_agent_with_tools
 
     t0 = time.time()
 
     try:
-        compiled, initial_state = await build_mcp_agent(
-            goal=goal,
-            manager=manager,
-            server_configs=server_configs,
-            max_steps=max_steps,
-        )
-
-        final_state = await compiled.ainvoke(initial_state)
+        if cached_tools is not None and interceptor is not None:
+            interceptor.set_manager(manager)
+            final_state = await run_agent_with_tools(
+                goal=goal, tools=cached_tools, max_steps=max_steps,
+            )
+            interceptor.set_manager(None)
+        else:
+            compiled, initial_state = await build_mcp_agent(
+                goal=goal, manager=manager,
+                server_configs=server_configs, max_steps=max_steps,
+            )
+            final_state = await compiled.ainvoke(initial_state)
 
         success      = score_fn(task_id, final_state) >= 1.0
         final_answer = final_state.get("final_answer")
 
     except Exception as exc:
         import traceback
-        if verbose:
-            print(f"  [MCP] Task {task_id} error: {type(exc).__name__}: {exc}")
-            traceback.print_exc()
+        print(f"  [MCP] Task {task_id} error: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
         success      = False
         final_answer = None
 
-    ctx          = manager.get_compressed_context()
-    peak_tokens  = ctx.total_tokens()
-    total_tokens = ctx.total_tokens()
-
+    ctx = manager.get_compressed_context()
     return TaskResult(
-        task_id=task_id,
-        goal=goal,
-        success=success,
-        steps=len(ctx.elements),
-        final_answer=final_answer,
-        peak_tokens=peak_tokens,
-        total_tokens=total_tokens,
-        time_elapsed=time.time() - t0,
-        ccp_stats=manager.get_stats_log(),
-        method="",
+        task_id=task_id, goal=goal, success=success,
+        steps=len(ctx.elements), final_answer=final_answer,
+        peak_tokens=ctx.total_tokens(), total_tokens=ctx.total_tokens(),
+        time_elapsed=time.time() - t0, ccp_stats=manager.get_stats_log(), method="",
     )
-
 
 async def _run_all_tasks_async(
     tasks:              List[Any],
