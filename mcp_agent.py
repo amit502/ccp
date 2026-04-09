@@ -156,20 +156,23 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
     if len(tools) > 60:
         tool_summary += f"\n  ... and {len(tools)-60} more tools"
 
-    system_text = f"""You are an autonomous agent completing tasks by calling real API tools.
+    system_text = f"""You are an autonomous agent. Your job is to COMPLETE the task described below by calling tools.
 
-RULES:
-1. You are in a REAL environment. All tools work. Call them.
-2. NEVER say "I cannot", "unable to locate", or ask the user for info.
-3. ALWAYS follow this sequence:
-   a. Call supervisor__show_active_task_active_task_get to get task details + credentials
-   b. Authenticate with each required app using its __authenticate tool and the supervisor credentials
-   c. Call tools to complete the task
-   d. Only finish after ALL actions are verified done
-4. Respond ONLY with a JSON object — no prose.
+SEQUENCE (follow exactly):
+1. Call supervisor__show_active_task_active_task_get → read the "instruction" field carefully
+2. The "instruction" IS the real task — do everything it says using the available tools
+3. Authenticate with required apps (use credentials from the task details)
+4. Execute all required actions (send money, place orders, send emails, etc.)
+5. Only call finish AFTER all actions from the instruction are done
 
 TOOL CALL: {{"action":"tool_call","tool":"<exact_tool_name>","input":{{<params>}}}}
-FINISH:    {{"action":"finish","answer":"<what you did>"}}
+FINISH (only after completing everything): {{"action":"finish","answer":"<what you did>"}}
+
+RULES:
+- NEVER finish after just reading the task — you must complete it
+- NEVER say "retrieved task details" as a final answer — that is NOT task completion
+- If a tool returns an error, try again with different parameters
+- Respond ONLY with JSON
 
 Available tools:
 {tool_summary}
@@ -233,18 +236,24 @@ Goal: {state["goal"]}"""
         # Reasoning model — do follow-up to get actual JSON action
         if raw.startswith(_REASONING_SENTINEL):
             reasoning = raw[len(_REASONING_SENTINEL):]
+            # If on step 0 or 1, prevent premature finish — must call tools first
+            step_warning = ""
+            if state["step"] <= 1:
+                step_warning = (
+                    " IMPORTANT: Do NOT output finish yet — "
+                    "you have only just started. Call the next tool."
+                )
             follow_msgs = formatted + [
                 {"role": "assistant", "content": f"<thinking>{reasoning}</thinking>"},
                 {"role": "user", "content":
-                    "Based on your reasoning above, output ONLY the JSON action now. "
-                    "No thinking tags — just the JSON object."},
+                    f"Based on your reasoning, output ONLY the JSON action now. "
+                    f"No thinking tags — just the JSON object.{step_warning}"},
             ]
             raw = await asyncio.get_event_loop().run_in_executor(
                 None, _llm_raw, follow_msgs, 0.0
             )
             if not isinstance(raw, str):
                 raw = ""
-            # Strip any remaining sentinel
             if raw.startswith(_REASONING_SENTINEL):
                 raw = ""
     except Exception as e:
@@ -266,12 +275,28 @@ Goal: {state["goal"]}"""
         parsed = json.loads(clean)
         action = parsed.get("action", "")
 
-        # Detect finish
+        # Detect finish — but not if we've done fewer than 3 tool calls
+        # (prevents finishing after just reading the task)
         if (action == "finish"
                 or parsed.get("answer") is not None
                 or "FINAL ANSWER" in str(parsed.get("answer", ""))):
-            done         = True
-            final_answer = str(parsed.get("answer", parsed.get("result", "")))
+            answer = str(parsed.get("answer", parsed.get("result", "")))
+            trivial = any(x in answer.lower() for x in [
+                "retrieved", "read", "obtained", "got the task",
+                "task details", "active task",
+            ])
+            if trivial and state["step"] <= 3:
+                # Force continuation — agent hasn't done real work yet
+                print(f"  [agent] premature finish blocked at step {state['step']}: {answer[:80]!r}", flush=True)
+                tool_calls = [{
+                    "name": "supervisor__show_active_task_active_task_get",
+                    "args": {},
+                    "id":   f"call_{state['step']}_retry",
+                    "type": "tool_call",
+                }]
+            else:
+                done         = True
+                final_answer = answer
 
         # Detect tool call — handle multiple naming conventions
         elif action in ("tool_call", "call_tool", "use_tool") or              "tool" in parsed or "function" in parsed or "name" in parsed:
