@@ -162,23 +162,25 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
                                   + (f" (+{len(tnames)-8} more)" if len(tnames) > 8 else ""))
     tool_summary = "\n".join(tool_summary_parts)
 
-    system_text = f"""You are an autonomous agent. Your job is to COMPLETE the task described below by calling tools.
+    system_text = f"""You are an autonomous agent. Complete the task by calling tools in sequence.
 
-SEQUENCE (follow exactly):
-1. Call supervisor__show_active_task_active_task_get → read the "instruction" field carefully
-2. The "instruction" IS the real task — do everything it says using the available tools
-3. Authenticate with required apps (use credentials from the task details)
-4. Execute all required actions (send money, place orders, send emails, etc.)
-5. Only call finish AFTER all actions from the instruction are done
+STRICT SEQUENCE:
+1. Call supervisor__show_active_task_active_task_get → read the "instruction" field
+2. Call supervisor__show_account_passwords_account_passwords_get → get credentials
+3. Login to required app: use the EXACT field names the API expects:
+   - For Venmo: venmo__login_auth_token_post with {{"username": "<value>", "password": "<value>"}}
+   - The "account_name" from passwords = the "username" for login
+   - NEVER use placeholders like {{{{email}}}} — use the REAL values from step 2
+4. Execute the required actions (send payment, request money, etc.)
+5. Call finish ONLY after completing all actions
 
-TOOL CALL: {{"action":"tool_call","tool":"<exact_tool_name>","input":{{<params>}}}}
-FINISH (only after completing everything): {{"action":"finish","answer":"<what you did>"}}
+TOOL CALL: {{"action":"tool_call","tool":"<exact_tool_name>","input":{{<real_params>}}}}
+FINISH:    {{"action":"finish","answer":"<what you did>"}}
 
 RULES:
-- NEVER finish after just reading the task — you must complete it
-- NEVER say "retrieved task details" as a final answer — that is NOT task completion
-- If a tool returns an error, try again with different parameters
-- Respond ONLY with JSON
+- Use REAL credential values, never template placeholders
+- If login fails with 422, check the exact field names the tool expects
+- Respond with a JSON OBJECT (not array), no prose
 
 Available tools:
 {tool_summary}
@@ -279,6 +281,9 @@ Goal: {state["goal"]}"""
     try:
         clean  = re.sub(r"```(?:json)?|```", "", raw).strip()
         parsed = json.loads(clean)
+        # LLM sometimes wraps in an array — unwrap it
+        if isinstance(parsed, list) and parsed:
+            parsed = parsed[0]
         action = parsed.get("action", "")
 
         # Detect finish — but not if we've done fewer than 3 tool calls
@@ -430,25 +435,59 @@ async def build_shared_client(server_configs: Dict[str, Any]) -> tuple:
 async def run_agent_with_tools(
     goal: str, tools: List[Any], max_steps: int,
 ) -> Dict[str, Any]:
-    """Run agent with pre-built tools — no new MCP client created."""
+    """
+    Run agent with pre-built tools.
+    Uses a custom tool executor instead of ToolNode to avoid
+    ToolNode starting a fresh MCP subprocess per call.
+    """
     venmo_tools = [t.name for t in tools if "venmo" in t.name.lower()]
     print(f"  [tools] total={len(tools)} venmo={venmo_tools[:5]}", flush=True)
-    graph = StateGraph(MCPAgentState)
 
-    async def agent_node(state):
-        return await _agent_node(state, tools)
+    # Build tool lookup by name
+    tool_map = {t.name: t for t in tools}
 
-    graph.add_node("agent", agent_node)
-    graph.add_node("tools", ToolNode(tools))
-    graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", _route, {"tools": "tools", "end": END})
-    graph.add_edge("tools", "agent")
-    compiled = graph.compile()
+    async def execute_tool_calls(messages: list) -> list:
+        """Execute tool calls from the last AIMessage and return ToolMessages."""
+        from langchain_core.messages import ToolMessage
+        last = messages[-1] if messages else None
+        if not isinstance(last, AIMessage):
+            return []
+        results = []
+        for tc in (getattr(last, "tool_calls", None) or []):
+            name = tc.get("name", "")
+            args = tc.get("args", {})
+            call_id = tc.get("id", f"call_{name}")
+            tool = tool_map.get(name)
+            if tool is None:
+                content = f"Error: {name} is not a valid tool. Available: {list(tool_map.keys())[:10]}"
+            else:
+                try:
+                    content = await tool.ainvoke(args)
+                    if not isinstance(content, str):
+                        content = json.dumps(content)
+                except Exception as e:
+                    content = f"Tool error: {e}"
+            results.append(ToolMessage(content=content, tool_call_id=call_id))
+        return results
 
-    return await compiled.ainvoke({
+    state = {
         "messages": [], "goal": goal, "step": 0,
         "max_steps": max_steps, "done": False, "final_answer": None,
-    })
+    }
+
+    for _ in range(max_steps):
+        state = await _agent_node(state, tools)
+        if state["done"]:
+            break
+        # Execute tool calls if any
+        tool_msgs = await execute_tool_calls(state["messages"])
+        if tool_msgs:
+            state = {**state, "messages": state["messages"] + tool_msgs}
+        elif not state["done"]:
+            # No tool calls and not done — stuck, break
+            break
+
+    return state
 
 
 async def build_mcp_agent(
