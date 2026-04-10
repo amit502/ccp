@@ -111,39 +111,32 @@ def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[
 
 def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
     """
-    Seed task-specific databases into the AppWorld APIs server.
-    Uses POST /dbs on the APIs server (port 8000) directly.
-    This was working — /initialize on serve environment is broken.
+    Seed a task using AppWorld Python library (appworld venv subprocess).
+    This properly sets up JWT validation against the correct frozen datetime,
+    fixing the persistent 401 unauthorized errors from HTTP-only seeding.
     """
-    task_dbs_path = str(Path(appworld_root) / "data" / "tasks" / task.id / "dbs")
+    import subprocess, json as _json
+    seed_script = str(Path(__file__).parent.parent / "seed_task.py")
+    venv_python  = str(Path(APPWORLD_ROOT_VENV) / "bin" / "python3")
+
     try:
-        r = requests.post(
-            f"{appworld_url}/dbs",
-            json={
-                "from_db_home_path": task_dbs_path,
-                "to_db_home_path":   ":memory:base",
-                "create": False,
-                "app_names":         [],
-            },
-            timeout=30,
+        result = subprocess.run(
+            [venv_python, seed_script, task.id, appworld_root, appworld_url],
+            capture_output=True, text=True, timeout=30,
         )
-        if r.status_code not in (200, 201):
-            print(f"  [AppWorld] /dbs seed failed ({r.status_code}): {r.text[:100]}")
-            return False
-        # Set task datetime
-        task_datetime = getattr(task, "data", {}).get("datetime")
-        if task_datetime:
-            try:
-                requests.post(
-                    f"{appworld_url}/date_time",
-                    json={"date_and_time": task_datetime},
-                    timeout=10,
-                )
-            except Exception:
-                pass
-        return True
+        if result.stderr:
+            print(f"  [seed] {result.stderr[:200]}", flush=True)
+        for line in reversed((result.stdout or "").strip().splitlines()):
+            if line.startswith("{"):
+                data = _json.loads(line)
+                if data.get("success"):
+                    return True
+                print(f"  [seed] failed: {data.get('error','')[:100]}", flush=True)
+                return False
+        print(f"  [seed] no output (rc={result.returncode})", flush=True)
+        return False
     except Exception as e:
-        print(f"  [AppWorld] /dbs seed error: {e}")
+        print(f"  [seed] exception: {e}", flush=True)
         return False
 
 
