@@ -109,31 +109,40 @@ def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[
 # ---------------------------------------------------------------------------
 
 
+# Track active seed processes: task_id → subprocess
+_seed_processes: dict = {}
+
+
 def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
     """
     Seed a task using AppWorld Python library (appworld venv subprocess).
-    This properly sets up JWT validation against the correct frozen datetime,
-    fixing the persistent 401 unauthorized errors from HTTP-only seeding.
+    Keeps the subprocess alive during agent execution so AppWorld doesn't
+    clear the task DB from the APIs server memory on close.
     """
     import subprocess, json as _json
     seed_script = str(Path(__file__).parent.parent / "seed_task.py")
     venv_python  = str(Path(APPWORLD_ROOT_VENV) / "bin" / "python3")
 
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [venv_python, seed_script, task.id, appworld_root, appworld_url],
-            capture_output=True, text=True, timeout=30,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-        if result.stderr:
-            print(f"  [seed] {result.stderr[:200]}", flush=True)
-        for line in reversed((result.stdout or "").strip().splitlines()):
-            if line.startswith("{"):
-                data = _json.loads(line)
-                if data.get("success"):
-                    return True
-                print(f"  [seed] failed: {data.get('error','')[:100]}", flush=True)
-                return False
-        print(f"  [seed] no output (rc={result.returncode})", flush=True)
+        # Read the ready signal
+        line = proc.stdout.readline().strip()
+        if line.startswith("{"):
+            data = _json.loads(line)
+            if data.get("success"):
+                _seed_processes[task.id] = proc
+                return True
+            print(f"  [seed] failed: {data.get('error','')[:100]}", flush=True)
+            proc.kill()
+            return False
+        print(f"  [seed] no ready signal: {line[:100]}", flush=True)
+        proc.kill()
         return False
     except Exception as e:
         print(f"  [seed] exception: {e}", flush=True)
@@ -152,10 +161,12 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
     )
     Path(out_dbs_path).mkdir(parents=True, exist_ok=True)
     try:
+        # AppWorld uses :memory:task_output-{task_id} for the agent's working state
+        # (set up by seed_task.py via AppWorld(task_id, remote_apis_url=...))
         r = requests.post(
             f"{appworld_url}/dbs/save",
             json={
-                "from_db_home_path": f":memory:task_input-{task_id}",
+                "from_db_home_path": f":memory:task_output-{task_id}",
                 "to_db_home_path":   out_dbs_path,
                 "format":            "full",
                 "delete_if_exists":  True,
@@ -173,15 +184,15 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
 
 
 def _reset_task(task_id: str, appworld_url: str) -> None:
-    """Clear task databases from memory."""
-    try:
-        requests.delete(
-            f"{appworld_url}/dbs/cache",
-            json={"task_id": task_id},
-            timeout=10,
-        )
-    except Exception:
-        pass
+    """Close the seed subprocess (which clears task DB) after saving."""
+    # Close the seed subprocess — sends EOF to stdin which lets it exit cleanly
+    proc = _seed_processes.pop(task_id, None)
+    if proc:
+        try:
+            proc.stdin.close()
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
 
 
 def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
