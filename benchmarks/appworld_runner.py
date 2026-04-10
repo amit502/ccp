@@ -150,19 +150,25 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
 
 
 def _save_task(task_id: str, appworld_root: str, appworld_url: str,
-               experiment_name: str = "ccp") -> bool:
+               experiment_name: str = "ccp",
+               app_names: list = None) -> bool:
     """
     Save in-memory task DB state to disk so the evaluator can read it.
-    AppWorld evaluator reads from:
-      {appworld_root}/experiments/outputs/{experiment_name}/tasks/{task_id}/dbs/
+    Must pass app_names — empty list only saves admin+supervisor, missing task apps.
     """
     out_dbs_path = str(
         Path(appworld_root) / "experiments" / "outputs" / experiment_name / "tasks" / task_id / "dbs"
     )
     Path(out_dbs_path).mkdir(parents=True, exist_ok=True)
+
+    # Default: save all known AppWorld apps
+    if app_names is None:
+        app_names = [
+            "amazon", "file_system", "gmail", "phone", "simple_note",
+            "splitwise", "spotify", "todoist", "venmo", "admin", "supervisor",
+        ]
+
     try:
-        # AppWorld uses :memory:task_output-{task_id} for the agent's working state
-        # (set up by seed_task.py via AppWorld(task_id, remote_apis_url=...))
         r = requests.post(
             f"{appworld_url}/dbs/save",
             json={
@@ -170,13 +176,14 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
                 "to_db_home_path":   out_dbs_path,
                 "format":            "full",
                 "delete_if_exists":  True,
-                "app_names":         [],
+                "app_names":         app_names,
             },
-            timeout=30,
+            timeout=60,
         )
         if r.status_code not in (200, 201):
             print(f"  [save] /dbs/save failed ({r.status_code}): {r.text[:100]}", flush=True)
             return False
+        print(f"  [save] saved {len(app_names)} apps to disk", flush=True)
         return True
     except Exception as e:
         print(f"  [save] error: {e}", flush=True)
@@ -208,8 +215,19 @@ def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
         print(f"  [eval] venv python not found at {venv_python}", flush=True)
         return 1.0 if final_state.get("done") else 0.0
 
-    # Save in-memory DB state to disk before evaluating
-    _save_task(task_id, APPWORLD_ROOT, APPWORLD_URL)
+    # Save in-memory DB state — get task's allowed apps from specs if possible
+    task_apps = None
+    specs_path = Path(APPWORLD_ROOT) / "data" / "tasks" / task_id / "specs.json"
+    if specs_path.exists():
+        import json as _j
+        try:
+            specs = _j.loads(specs_path.read_text())
+            allowed = specs.get("allowed_apps", [])
+            if allowed:
+                task_apps = allowed + ["admin", "supervisor"]
+        except Exception:
+            pass
+    _save_task(task_id, APPWORLD_ROOT, APPWORLD_URL, app_names=task_apps)
 
     try:
         result = subprocess.run(
