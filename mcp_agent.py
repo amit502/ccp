@@ -231,12 +231,19 @@ Goal: {state["goal"]}"""
                     content = "\n".join(parts)
                 else:
                     content = str(raw_content)
-                content = content[:800]
+                content = content[:2000]
                 if content:
-                    print(f"  [tool result] {content[:150]}", flush=True)
+                    # Abbreviate long JWT tokens so they don't fill LLM context
+                    import re as _re
+                    display = _re.sub(
+                        r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',
+                        lambda m: m.group(0)[:40] + "...<JWT>",
+                        content
+                    )
+                    print(f"  [tool result] {display[:150]}", flush=True)
                     llm_messages.append({
                         "role":    "user",
-                        "content": f"Tool result: {content}\nIf this shows an error or validation failure, check the field names and try again with correct values.",
+                        "content": f"Tool result: {display}\nIf this shows an error or validation failure, check the field names and try again.",
                     })
 
     # Call LLM with full conversation history
@@ -488,7 +495,10 @@ async def run_agent_with_tools(
                         content = json.dumps(raw_result)
                 except Exception as e:
                     content = f"Tool error: {e}"
-            print(f"  [exec] {name}({list(args.keys())}) → {content[:120]}", flush=True)
+            import re as _re2
+            display_c = _re2.sub(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',
+                                  lambda m: m.group(0)[:30]+"...<JWT>", content)
+            print(f"  [exec] {name}({list(args.keys())}) → {display_c[:150]}", flush=True)
             results.append(ToolMessage(content=content, tool_call_id=call_id))
         return results
 
