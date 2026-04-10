@@ -167,12 +167,13 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
 STRICT SEQUENCE:
 1. Call supervisor__show_active_task_active_task_get → read the "instruction" field
 2. Call supervisor__show_account_passwords_account_passwords_get → get credentials
-3. Login to required app: use the EXACT field names the API expects:
-   - For Venmo: venmo__login_auth_token_post with {{"username": "<value>", "password": "<value>"}}
-   - The "account_name" from passwords = the "username" for login
-   - NEVER use placeholders like {{{{email}}}} — use the REAL values from step 2
-4. Execute the required actions (send payment, request money, etc.)
-5. Call finish ONLY after completing all actions
+3. Login: venmo__login_auth_token_post with {{"username": "<email_from_passwords>", "password": "<password>"}}
+   - Use the supervisor email (e.g. nicholas.weber@gmail.com) as username
+4. To find a recipient's email: call venmo__search_users_users_get with {{"query": "<name>"}} then use the email from results
+5. Execute with EXACT field names:
+   - REQUEST money FROM someone: venmo__create_payment_request_payment_requests_post → user_email=<recipient_email>
+   - SEND money TO someone: venmo__create_transaction_transactions_post → receiver_email=<recipient_email>
+6. Call finish ONLY after completing all actions
 
 TOOL CALL: {{"action":"tool_call","tool":"<exact_tool_name>","input":{{<real_params>}}}}
 FINISH:    {{"action":"finish","answer":"<what you did>"}}
