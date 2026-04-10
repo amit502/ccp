@@ -169,7 +169,10 @@ STRICT SEQUENCE:
 2. Call supervisor__show_account_passwords_account_passwords_get → get credentials
 3. Login: venmo__login_auth_token_post with {{"username": "<email_from_passwords>", "password": "<password>"}}
    - Use the supervisor email (e.g. nicholas.weber@gmail.com) as username
-4. To find a recipient's email: call venmo__search_users_users_get with {{"query": "<name>"}} then use the email from results
+4. Find recipient email (try each until success):
+   a. venmo__search_users_users_get {{"query":"<name>"}}
+   b. phone__search_contacts_contacts_get {{"query":"<name>"}}
+   c. gmail__search_users_users_get {{"query":"<name>"}}
 5. Execute with EXACT field names:
    - REQUEST money FROM someone: venmo__create_payment_request_payment_requests_post → user_email=<recipient_email>
    - SEND money TO someone: venmo__create_transaction_transactions_post → receiver_email=<recipient_email>
