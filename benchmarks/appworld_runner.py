@@ -121,8 +121,9 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
             f"{appworld_url}/dbs",
             json={
                 "from_db_home_path": task_dbs_path,
-                "to_db_home_path":   f":memory:task_input-{task.id}",
+                "to_db_home_path":   ":memory:base",
                 "create": False,
+                "app_names":         [],
             },
             timeout=30,
         )

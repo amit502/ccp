@@ -223,6 +223,11 @@ class AppWorldMCPServer:
                 if "access_token" in _body:
                     _qp["access_token"] = _body.pop("access_token")
 
+                # Also send token in Authorization header (some endpoints check header)
+                _headers = {}
+                if _qp.get("access_token"):
+                    _headers["Authorization"] = f"Bearer {_qp['access_token']}"
+
                 async def _call():
                     if http_m in ("post", "put", "patch"):
                         if "auth/token" in _url:
@@ -234,16 +239,18 @@ class AppWorldMCPServer:
                                 _form["username"] = _form.pop("login")
                             if "account_name" in _form and "username" not in _form:
                                 _form["username"] = _form.pop("account_name")
+                            _f = dict(_form)
                             return await asyncio.get_event_loop().run_in_executor(
-                                None, lambda: fn(_url, data=_form, params=_qp, timeout=30)
+                                None, lambda: fn(_url, data=_f, params=_qp, headers=_headers, timeout=30)
                             )
+                        _b = dict(_body)
                         return await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: fn(_url, json=_body, params=_qp, timeout=30)
+                            None, lambda: fn(_url, json=_b, params=_qp, headers=_headers, timeout=30)
                         )
                     else:
                         _merged = {**_body, **_qp}
                         return await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: fn(_url, params=_merged, timeout=30)
+                            None, lambda: fn(_url, params=_merged, headers=_headers, timeout=30)
                         )
 
                 resp   = await _call()
