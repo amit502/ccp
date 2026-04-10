@@ -149,12 +149,18 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
         f"  {t.name}: {t.description}" for t in tools
     )
 
-    # Tool list (trimmed)
-    tool_summary = "\n".join(
-        f"  {t.name}: {t.description.split('.')[0]}" for t in tools[:60]
-    )
-    if len(tools) > 60:
-        tool_summary += f"\n  ... and {len(tools)-60} more tools"
+    # Group tools by app prefix for readability
+    from collections import defaultdict
+    app_tools = defaultdict(list)
+    for t in tools:
+        app = t.name.split("__")[0] if "__" in t.name else "other"
+        app_tools[app].append(t.name)
+
+    tool_summary_parts = []
+    for app, tnames in sorted(app_tools.items()):
+        tool_summary_parts.append(f"  [{app}]: {', '.join(tnames[:8])}"
+                                  + (f" (+{len(tnames)-8} more)" if len(tnames) > 8 else ""))
+    tool_summary = "\n".join(tool_summary_parts)
 
     system_text = f"""You are an autonomous agent. Your job is to COMPLETE the task described below by calling tools.
 
@@ -425,6 +431,8 @@ async def run_agent_with_tools(
     goal: str, tools: List[Any], max_steps: int,
 ) -> Dict[str, Any]:
     """Run agent with pre-built tools — no new MCP client created."""
+    venmo_tools = [t.name for t in tools if "venmo" in t.name.lower()]
+    print(f"  [tools] total={len(tools)} venmo={venmo_tools[:5]}", flush=True)
     graph = StateGraph(MCPAgentState)
 
     async def agent_node(state):

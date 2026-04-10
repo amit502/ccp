@@ -249,11 +249,9 @@ class AppWorldMCPRunner:
         self._tasks = _load_tasks_from_fs(APPWORLD_ROOT, split, max_tasks)
         print(f"[AppWorldMCPRunner] Loaded {len(self._tasks)} tasks from {APPWORLD_ROOT}")
 
-        # Pre-fetch MCP tools once — reused across all 6 method evaluate() calls
-        # This avoids re-fetching 463 OpenAPI specs per method run
+        # Tools fetched lazily inside each evaluate() call's event loop
         self._tools       = None
         self._interceptor = None
-        self._prefetch_tools()
 
     def _server_configs(self) -> Dict[str, Any]:
         return {
@@ -291,6 +289,7 @@ class AppWorldMCPRunner:
         if verbose:
             print(f"\n[AppWorld/MCP] {method_name} | {len(self._tasks)} tasks")
 
+        # Build shared client INSIDE the event loop so tool sessions stay valid
         results = asyncio.run(
             _run_all_tasks_async(
                 tasks=self._tasks,
@@ -299,8 +298,6 @@ class AppWorldMCPRunner:
                 max_steps=self.max_steps,
                 score_fn=self._score,
                 verbose=verbose,
-                cached_tools=self._tools,
-                cached_interceptor=self._interceptor,
             )
         )
         for r in results:
