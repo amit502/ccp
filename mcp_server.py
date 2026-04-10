@@ -217,20 +217,26 @@ class AppWorldMCPServer:
                 _args = arguments
                 _url  = url
 
+                # Always send access_token as query param (AppWorld API convention)
+                _qp   = {}
+                _body = dict(_args)
+                if "access_token" in _body:
+                    _qp["access_token"] = _body.pop("access_token")
+
                 async def _call():
                     if http_m in ("post", "put", "patch"):
-                        # Try JSON first; if 422 and auth/token endpoint, retry as form
-                        r = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: fn(_url, json=_args, timeout=30)
-                        )
-                        if r.status_code == 422 and "auth/token" in _url:
-                            r = await asyncio.get_event_loop().run_in_executor(
-                                None, lambda: fn(_url, data=_args, timeout=30)
+                        if "auth/token" in _url:
+                            # OAuth endpoints use form data
+                            return await asyncio.get_event_loop().run_in_executor(
+                                None, lambda: fn(_url, data=_body, params=_qp, timeout=30)
                             )
-                        return r
-                    else:
                         return await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: fn(_url, params=_args, timeout=30)
+                            None, lambda: fn(_url, json=_body, params=_qp, timeout=30)
+                        )
+                    else:
+                        _merged = {**_body, **_qp}
+                        return await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: fn(_url, params=_merged, timeout=30)
                         )
 
                 resp   = await _call()
