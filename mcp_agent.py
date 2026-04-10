@@ -115,6 +115,7 @@ class MCPAgentState(TypedDict):
     max_steps:    int
     done:         bool
     final_answer: Optional[str]
+    access_tokens: dict  # stored auth tokens per app
 
 
 _SYSTEM_PROMPT = """\
@@ -233,17 +234,24 @@ Goal: {state["goal"]}"""
                     content = str(raw_content)
                 content = content[:2000]
                 if content:
-                    # Abbreviate long JWT tokens so they don't fill LLM context
+                    print(f"  [tool result] {content[:150]}", flush=True)
+                    # Store access tokens found in results so agent can reference them
                     import re as _re
-                    display = _re.sub(
-                        r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',
-                        lambda m: m.group(0)[:40] + "...<JWT>",
-                        content
-                    )
-                    print(f"  [tool result] {display[:150]}", flush=True)
+                    tokens = _re.findall(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', content)
+                    for tok in tokens:
+                        if "access_tokens" not in state:
+                            state = {**state, "access_tokens": {}}
+                        # Identify app from recent tool calls
+                        if state.get("messages"):
+                            last_ai = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
+                            if last_ai:
+                                for tc in (getattr(last_ai, "tool_calls", None) or []):
+                                    app = tc.get("name","").split("__")[0]
+                                    if app:
+                                        state["access_tokens"][app] = tok
                     llm_messages.append({
                         "role":    "user",
-                        "content": f"Tool result: {display}\nIf this shows an error or validation failure, check the field names and try again.",
+                        "content": f"Tool result: {content}\nIf this shows an error or validation failure, check the field names and try again.",
                     })
 
     # Call LLM with full conversation history
@@ -294,7 +302,31 @@ Goal: {state["goal"]}"""
     tool_calls = []
 
     try:
-        clean  = re.sub(r"```(?:json)?|```", "", raw).strip()
+        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        # Take only the first JSON object if multiple are present
+        # Find matching closing brace for the first {
+        if clean.startswith("{"):
+            depth = 0
+            end = 0
+            in_str = False
+            esc = False
+            for i, ch in enumerate(clean):
+                if esc:
+                    esc = False
+                    continue
+                if ch == "\\" and in_str:
+                    esc = True
+                    continue
+                if ch == '"' and not esc:
+                    in_str = not in_str
+                if not in_str:
+                    if ch == "{": depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+            clean = clean[:end] if end else clean
         parsed = json.loads(clean)
         # LLM sometimes wraps in an array — unwrap it
         if isinstance(parsed, list) and parsed:
@@ -461,7 +493,7 @@ async def run_agent_with_tools(
     # Build tool lookup by name
     tool_map = {t.name: t for t in tools}
 
-    async def execute_tool_calls(messages: list) -> list:
+    async def execute_tool_calls(messages: list, current_state: dict) -> list:
         """Execute tool calls from the last AIMessage and return ToolMessages."""
         from langchain_core.messages import ToolMessage
         last = messages[-1] if messages else None
@@ -477,6 +509,11 @@ async def run_agent_with_tools(
                 content = f"Error: {name} is not a valid tool. Available: {list(tool_map.keys())[:10]}"
             else:
                 try:
+                    # Auto-inject access token if agent forgot it
+                    if "access_token" not in args and current_state.get("access_tokens"):
+                        _ap = name.split("__")[0]
+                        _tk = current_state["access_tokens"].get(_ap)
+                        if _tk: args = {**args, "access_token": _tk}
                     raw_result = await tool.ainvoke(args)
                     # Extract text from content block format: [{"type":"text","text":"..."}]
                     if isinstance(raw_result, list):
@@ -495,16 +532,13 @@ async def run_agent_with_tools(
                         content = json.dumps(raw_result)
                 except Exception as e:
                     content = f"Tool error: {e}"
-            import re as _re2
-            display_c = _re2.sub(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+',
-                                  lambda m: m.group(0)[:30]+"...<JWT>", content)
-            print(f"  [exec] {name}({list(args.keys())}) → {display_c[:150]}", flush=True)
+            print(f"  [exec] {name}({list(args.keys())}) → {content[:150]}", flush=True)
             results.append(ToolMessage(content=content, tool_call_id=call_id))
         return results
 
     state = {
         "messages": [], "goal": goal, "step": 0,
-        "max_steps": max_steps, "done": False, "final_answer": None,
+        "max_steps": max_steps, "done": False, "final_answer": None, "access_tokens": {},
     }
 
     for _ in range(max_steps):
@@ -512,7 +546,7 @@ async def run_agent_with_tools(
         if state["done"]:
             break
         # Execute tool calls if any
-        tool_msgs = await execute_tool_calls(state["messages"])
+        tool_msgs = await execute_tool_calls(state["messages"], state)
         if tool_msgs:
             state = {**state, "messages": state["messages"] + tool_msgs}
         elif not state["done"]:
