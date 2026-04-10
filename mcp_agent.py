@@ -346,13 +346,29 @@ Stored credentials (use these access_tokens directly — do NOT login again if t
                 or parsed.get("answer") is not None
                 or "FINAL ANSWER" in str(parsed.get("answer", ""))):
             answer = str(parsed.get("answer", parsed.get("result", "")))
-            trivial = any(x in answer.lower() for x in [
-                "retrieved", "read", "obtained", "got the task",
-                "task details", "active task",
+            # Check if agent actually called any action tools (not just read tools)
+            messages_so_far = state.get("messages", [])
+            action_tools_called = [
+                tc.get("name", "")
+                for m in messages_so_far if isinstance(m, AIMessage)
+                for tc in (getattr(m, "tool_calls", None) or [])
+                if tc.get("name", "").split("__")[0] not in ("supervisor",)
+            ]
+            read_only_finish = (
+                not action_tools_called and
+                any(x in answer.lower() for x in [
+                    "requested", "sent", "paid", "created", "added", "deleted",
+                    "updated", "completed", "transferred", "purchased", "rated",
+                ])
+            )
+            trivial = (state["step"] <= 3) or any(x in answer.lower() for x in [
+                "retrieved", "read", "obtained", "initial step",
+                "task details", "active task", "completed initial",
+                "gathered", "noted", "understood",
             ])
-            if trivial and state["step"] <= 3:
-                # Force continuation — agent hasn't done real work yet
+            if (trivial and state["step"] <= 5) or read_only_finish:
                 print(f"  [agent] premature finish blocked at step {state['step']}: {answer[:80]!r}", flush=True)
+                print(f"  [agent] action_tools_called={action_tools_called}", flush=True)
                 tool_calls = [{
                     "name": "supervisor__show_active_task_active_task_get",
                     "args": {},
