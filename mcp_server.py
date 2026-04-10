@@ -214,20 +214,27 @@ class AppWorldMCPServer:
 
             try:
                 fn = getattr(self._session, http_m)
-                import sys as _sys
-                print(f"  [mcp_server] {http_m.upper()} {url} args={arguments}", file=_sys.stderr, flush=True)
-                if http_m in ("post", "put", "patch"):
-                    _args = arguments  # capture for lambda
-                    resp = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: fn(url, json=_args, timeout=30)
-                    )
-                else:
-                    _args = arguments
-                    resp = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: fn(url, params=_args, timeout=30)
-                    )
+                _args = arguments
+                _url  = url
+
+                async def _call():
+                    if http_m in ("post", "put", "patch"):
+                        # Try JSON first; if 422 and auth/token endpoint, retry as form
+                        r = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: fn(_url, json=_args, timeout=30)
+                        )
+                        if r.status_code == 422 and "auth/token" in _url:
+                            r = await asyncio.get_event_loop().run_in_executor(
+                                None, lambda: fn(_url, data=_args, timeout=30)
+                            )
+                        return r
+                    else:
+                        return await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: fn(_url, params=_args, timeout=30)
+                        )
+
+                resp   = await _call()
                 output = resp.text
-                print(f"  [mcp_server] → {resp.status_code} {output[:80]}", file=_sys.stderr, flush=True)
             except Exception as exc:
                 output = json.dumps({"error": str(exc), "status": "error"})
 
