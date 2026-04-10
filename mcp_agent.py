@@ -149,7 +149,7 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
         f"  {t.name}: {t.description}" for t in tools
     )
 
-    # Group tools by app prefix for readability
+    # Group tools by app — show ALL names so agent can pick correct ones
     from collections import defaultdict
     app_tools = defaultdict(list)
     for t in tools:
@@ -158,8 +158,7 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
 
     tool_summary_parts = []
     for app, tnames in sorted(app_tools.items()):
-        tool_summary_parts.append(f"  [{app}]: {', '.join(tnames[:8])}"
-                                  + (f" (+{len(tnames)-8} more)" if len(tnames) > 8 else ""))
+        tool_summary_parts.append(f"  [{app}]: {', '.join(tnames)}")
     tool_summary = "\n".join(tool_summary_parts)
 
     system_text = f"""You are an autonomous agent. Complete the task by calling tools in sequence.
