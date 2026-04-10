@@ -185,7 +185,10 @@ RULES:
 Available tools:
 {tool_summary}
 
-Goal: {state["goal"]}"""
+Goal: {state["goal"]}
+
+Stored credentials (use these access_tokens directly — do NOT login again if token exists):
+{chr(10).join(f"  {app}: access_token already obtained" for app in state.get("access_tokens", {}).keys()) or "  (none yet)"}"""
 
     # Build proper messages array — each tool call and result as its own turn
     # This is what the reasoning model needs to track conversation state
@@ -237,7 +240,7 @@ Goal: {state["goal"]}"""
                     print(f"  [tool result] {content[:150]}", flush=True)
                     # Store access tokens found in results so agent can reference them
                     import re as _re
-                    tokens = _re.findall(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', content)
+                    tokens = _re.findall(r'eyJ[A-Za-z0-9_-]+[.][A-Za-z0-9_-]+[.][A-Za-z0-9_-]+', content)
                     for tok in tokens:
                         if "access_tokens" not in state:
                             state = {**state, "access_tokens": {}}
@@ -493,27 +496,29 @@ async def run_agent_with_tools(
     # Build tool lookup by name
     tool_map = {t.name: t for t in tools}
 
-    async def execute_tool_calls(messages: list, current_state: dict) -> list:
-        """Execute tool calls from the last AIMessage and return ToolMessages."""
+    async def execute_tool_calls(messages: list, current_state: dict) -> tuple:
+        """Execute tool calls. Returns (tool_messages, new_tokens_dict)."""
+        import re as _re_tok
         from langchain_core.messages import ToolMessage
         last = messages[-1] if messages else None
         if not isinstance(last, AIMessage):
-            return []
+            return [], {}
         results = []
+        new_tokens = {}
         for tc in (getattr(last, "tool_calls", None) or []):
             name = tc.get("name", "")
             args = tc.get("args", {})
             call_id = tc.get("id", f"call_{name}")
+            app = name.split("__")[0]
             tool = tool_map.get(name)
             if tool is None:
                 content = f"Error: {name} is not a valid tool. Available: {list(tool_map.keys())[:10]}"
             else:
                 try:
-                    # Auto-inject access token if agent forgot it
-                    if "access_token" not in args and current_state.get("access_tokens"):
-                        _ap = name.split("__")[0]
-                        _tk = current_state["access_tokens"].get(_ap)
-                        if _tk: args = {**args, "access_token": _tk}
+                    # Auto-inject stored access token if agent forgot it
+                    stored_tokens = {**current_state.get("access_tokens", {}), **new_tokens}
+                    if "access_token" not in args and app in stored_tokens:
+                        args = {**args, "access_token": stored_tokens[app]}
                     raw_result = await tool.ainvoke(args)
                     # Extract text from content block format: [{"type":"text","text":"..."}]
                     if isinstance(raw_result, list):
@@ -533,8 +538,14 @@ async def run_agent_with_tools(
                 except Exception as e:
                     content = f"Tool error: {e}"
             print(f"  [exec] {name}({list(args.keys())}) → {content[:150]}", flush=True)
+            # Extract any access tokens from result — store for any tool that returns a JWT
+            import re as _rj
+            jwt_matches = _rj.findall(r'eyJ[A-Za-z0-9_-]{10,}[.][A-Za-z0-9_-]{10,}[.][A-Za-z0-9_-]{10,}', content)
+            if jwt_matches:
+                new_tokens[app] = jwt_matches[0]
+                print(f"  [token] stored {app} token (len={len(jwt_matches[0])})", flush=True)
             results.append(ToolMessage(content=content, tool_call_id=call_id))
-        return results
+        return results, new_tokens
 
     state = {
         "messages": [], "goal": goal, "step": 0,
@@ -546,7 +557,10 @@ async def run_agent_with_tools(
         if state["done"]:
             break
         # Execute tool calls if any
-        tool_msgs = await execute_tool_calls(state["messages"], state)
+        tool_msgs, new_tokens = await execute_tool_calls(state["messages"], state)
+        if new_tokens:
+            merged = {**state.get("access_tokens", {}), **new_tokens}
+            state = {**state, "access_tokens": merged}
         if tool_msgs:
             state = {**state, "messages": state["messages"] + tool_msgs}
         elif not state["done"]:
