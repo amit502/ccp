@@ -85,6 +85,18 @@ spec:
                 echo "AppWorld data found at ${APPWORLD_ROOT}/data/base_dbs/admin.db — skipping download."
               fi
 
+              # ── 6b. Create dataset split files if missing ───────────────
+              DATASETS_DIR=${APPWORLD_ROOT}/data/datasets
+              TASKS_DIR=${APPWORLD_ROOT}/data/tasks
+              mkdir -p ${DATASETS_DIR}
+              if [ ! -f "${DATASETS_DIR}/test.txt" ]; then
+                echo "Creating dataset split files..."
+                ls ${TASKS_DIR} | head -750 > ${DATASETS_DIR}/test.txt
+                ls ${TASKS_DIR} | tail -n +751 > ${DATASETS_DIR}/train.txt
+                echo "Created test.txt ($(wc -l < ${DATASETS_DIR}/test.txt) tasks)"
+                echo "Created train.txt ($(wc -l < ${DATASETS_DIR}/train.txt) tasks)"
+              fi
+
               # ── 7. Start AppWorld server in background ──────────────────
               # Server must run from APPWORLD_ROOT so it finds ./data/
               echo "Starting AppWorld server..."

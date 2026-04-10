@@ -31,7 +31,7 @@ from .models import AgentContext, CCPStats, CompressionTier, ContextElement
 
 DEFAULT_TAU_HIGH  = 0.6   # τ_H: above this → active (preserve)
 DEFAULT_TAU_LOW   = 0.3   # τ_L: below this → inert  (discard/digest)
-DEFAULT_TOKEN_THRESHOLD = 4000  # T: trigger compression when context > T tokens
+DEFAULT_TOKEN_THRESHOLD = 500   # T: trigger compression when context > T tokens
 
 
 # ---------------------------------------------------------------------------
