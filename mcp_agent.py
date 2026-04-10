@@ -215,20 +215,29 @@ Goal: {state["goal"]}"""
                     "content": "\n".join(parts) or "(called tool)",
                 })
             else:
-                # ToolMessage — show result as a user turn
-                content = getattr(m, "content", "") or ""
-                if isinstance(content, list):
-                    content = " ".join(
-                        c.get("text", "") if isinstance(c, dict) else str(c)
-                        for c in content
-                    )
-                content = str(content)[:800]
+                # ToolMessage — extract text from content blocks if needed
+                raw_content = getattr(m, "content", "") or ""
+                if isinstance(raw_content, list):
+                    parts = []
+                    for block in raw_content:
+                        if isinstance(block, dict) and "text" in block:
+                            # Try to parse nested JSON for readability
+                            try:
+                                inner = json.loads(block["text"])
+                                parts.append(json.dumps(inner))
+                            except Exception:
+                                parts.append(block["text"])
+                        elif isinstance(block, str):
+                            parts.append(block)
+                    content = "\n".join(parts)
+                else:
+                    content = str(raw_content)
+                content = content[:800]
                 if content:
-                    # Log tool results so we can debug agent behavior
                     print(f"  [tool result] {content[:150]}", flush=True)
                     llm_messages.append({
                         "role":    "user",
-                        "content": f"Tool result: {content}\nIf this shows an error, fix it before proceeding.",
+                        "content": f"Tool result: {content}\nIf this shows an error or validation failure, check the field names and try again with correct values.",
                     })
 
     # Call LLM with full conversation history
@@ -462,11 +471,25 @@ async def run_agent_with_tools(
                 content = f"Error: {name} is not a valid tool. Available: {list(tool_map.keys())[:10]}"
             else:
                 try:
-                    content = await tool.ainvoke(args)
-                    if not isinstance(content, str):
-                        content = json.dumps(content)
+                    raw_result = await tool.ainvoke(args)
+                    # Extract text from content block format: [{"type":"text","text":"..."}]
+                    if isinstance(raw_result, list):
+                        parts = []
+                        for block in raw_result:
+                            if isinstance(block, dict) and "text" in block:
+                                parts.append(block["text"])
+                            elif isinstance(block, str):
+                                parts.append(block)
+                            else:
+                                parts.append(json.dumps(block))
+                        content = "\n".join(parts)
+                    elif isinstance(raw_result, str):
+                        content = raw_result
+                    else:
+                        content = json.dumps(raw_result)
                 except Exception as e:
                     content = f"Tool error: {e}"
+            print(f"  [exec] {name}({list(args.keys())}) → {content[:120]}", flush=True)
             results.append(ToolMessage(content=content, tool_call_id=call_id))
         return results
 
