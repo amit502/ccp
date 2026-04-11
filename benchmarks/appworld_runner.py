@@ -161,6 +161,15 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
     )
     Path(out_dbs_path).mkdir(parents=True, exist_ok=True)
 
+    # Debug: check what DB path the API server is actually using
+    try:
+        import requests as _req
+        dbs_info = _req.get(f"{appworld_url}/dbs", timeout=5).json()
+        venmo_path = dbs_info.get("venmo", "unknown")
+        print(f"  [save] API server venmo DB path: {venmo_path}", flush=True)
+    except Exception:
+        pass
+
     proc = _seed_processes.get(task_id)
     if proc is None:
         print(f"  [save] no seed process for {task_id} — falling back to HTTP", flush=True)
