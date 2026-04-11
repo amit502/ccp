@@ -182,7 +182,7 @@ def run_benchmark(
 # ---------------------------------------------------------------------------
 
 def run_appworld(method: str, max_tasks: int, max_steps: int, verbose: bool):
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "4000"))
+    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
     runner = _make_appworld_runner(max_tasks, max_steps)
     if runner is None:
         return
@@ -196,7 +196,7 @@ def run_appworld(method: str, max_tasks: int, max_steps: int, verbose: bool):
 
 
 def run_officebench(method: str, max_tasks: int, max_steps: int, verbose: bool):
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "4000"))
+    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
     runner = _make_officebench_runner(max_tasks, max_steps)
     if runner is None:
         return
@@ -210,7 +210,7 @@ def run_officebench(method: str, max_tasks: int, max_steps: int, verbose: bool):
 
 
 def run_multiqa(method: str, max_tasks: int, max_steps: int, verbose: bool):
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "4000"))
+    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
     runner = _make_multiqa_runner(max_tasks, max_steps)
     if runner is None:
         return
@@ -241,7 +241,7 @@ def run_ablation_threshold(max_tasks: int, verbose: bool):
     if runner is None:
         return
 
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "4000"))
+    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
     tau_values = [0.2, 0.4, 0.6, 0.8]
     all_metrics = []
 
@@ -275,7 +275,7 @@ def run_ablation_faithfulness(max_tasks: int, verbose: bool):
     if runner is None:
         return
 
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "4000"))
+    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
     all_metrics = []
 
     for use_h, name in [(True, "ccp_binary_scorer"), (False, "ccp_llm_scorer_only")]:
@@ -301,7 +301,7 @@ def run_ablation_mcp_struct(max_tasks: int, verbose: bool):
     if runner is None:
         return
 
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "4000"))
+    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
     all_metrics = []
 
     for use_h, name in [(True, "ccp_mcp_heuristics"), (False, "ccp_no_heuristics")]:
@@ -328,7 +328,7 @@ def run_ablation_online(max_tasks: int, verbose: bool):
     if runner is None:
         return
 
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "4000"))
+    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
     all_metrics = []
 
     for factory, name in [

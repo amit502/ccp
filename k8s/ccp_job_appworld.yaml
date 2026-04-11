@@ -33,6 +33,8 @@ spec:
               value: /app
             - name: LLM_DEBUG
               value: "1"
+            - name: TOKEN_THRESHOLD
+              value: "500"
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
