@@ -160,10 +160,13 @@ async def _run_all_tasks_async(
 
         # Wrap manager to track peak tokens after each compression event
         original_add = manager.add_observation
+        _mgr = manager
         def tracking_add(*args, **kwargs):
             elem = original_add(*args, **kwargs)
-            ctx_now = manager.get_compressed_context()
+            ctx_now = _mgr.get_compressed_context()
             toks = ctx_now.total_tokens()
+            stats = _mgr.get_stats_log()
+            print(f"  [mgr] toks={toks} threshold={_mgr.token_threshold} stats={len(stats)}", flush=True)
             if toks > peak_tokens_seen[0]:
                 peak_tokens_seen[0] = toks
             return elem
