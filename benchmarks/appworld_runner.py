@@ -172,7 +172,7 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
         r = requests.post(
             f"{appworld_url}/dbs/save",
             json={
-                "from_db_home_path": f":memory:task_output-{task_id}",
+                "from_db_home_path": ":memory:base",  # API server writes to :memory:base
                 "to_db_home_path":   out_dbs_path,
                 "format":            "full",
                 "delete_if_exists":  True,
