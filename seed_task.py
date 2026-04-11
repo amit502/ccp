@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-Seed a task using AppWorld's Python library.
-Run in the appworld venv — properly initializes task DBs and JWT validation.
-
-IMPORTANT: This script must NOT call AppWorld.close() or let the AppWorld
-object be garbage collected before the agent finishes. AppWorld.close()
-calls clear_remote_dbs_cache() which erases the task state from the
-APIs server memory.
-
-Usage: python seed_task.py <task_id> <appworld_root> <apis_url>
-Prints JSON: {"success": true}  then waits for stdin to close (agent done signal).
+Seed + Save task using AppWorld Python library in the appworld venv.
+Protocol:
+  - Prints {"success": true}  when seeding is done
+  - Waits on stdin for either:
+      "save <output_dir>\n"  → saves task state to disk, prints {"saved": true}
+      EOF                    → exits
 """
-import sys, json, os, atexit
+import sys, json, os
 
 task_id       = sys.argv[1]
 appworld_root = sys.argv[2]
@@ -25,23 +21,29 @@ try:
 
     from appworld import AppWorld
 
-    # Initialize — seeds task DBs into remote APIs server memory
-    # and sets frozen datetime for correct JWT validation
     world = AppWorld(
         task_id=task_id,
         remote_apis_url=apis_url,
-        load_ground_truth=False,  # faster, we evaluate separately
+        load_ground_truth=False,
     )
 
     print(json.dumps({"success": True, "task_id": task_id}), flush=True)
 
-    # Keep process alive so AppWorld doesn't close and clear the DB
-    # Caller closes stdin when task is done
-    sys.stdin.read()
+    # Wait for commands
+    for line in sys.stdin:
+        line = line.strip()
+        if line.startswith("save "):
+            output_dir = line[5:].strip()
+            try:
+                # Use AppWorld's native save — correct DB path guaranteed
+                world._save_state(output_dir)
+                print(json.dumps({"saved": True, "dir": output_dir}), flush=True)
+            except Exception as e:
+                print(json.dumps({"saved": False, "error": str(e)}), flush=True)
+        elif line == "exit":
+            break
 
-    # Don't call world.close() — let the process exit naturally
-    # The APIs server will retain the DB state for save
-
+    # Exit without calling world.close() — keeps DB state intact until save
 except Exception as e:
     print(json.dumps({"success": False, "error": str(e)}), flush=True)
     print(f"[seed_task] error: {e}", file=sys.stderr, flush=True)

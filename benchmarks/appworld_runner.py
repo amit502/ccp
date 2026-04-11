@@ -153,42 +153,51 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
                experiment_name: str = "ccp",
                app_names: list = None) -> bool:
     """
-    Save in-memory task DB state to disk so the evaluator can read it.
-    Must pass app_names — empty list only saves admin+supervisor, missing task apps.
+    Save task state via the seed subprocess using AppWorld native _save_state().
+    Sends "save <dir>" command to the subprocess via stdin.
     """
     out_dbs_path = str(
         Path(appworld_root) / "experiments" / "outputs" / experiment_name / "tasks" / task_id / "dbs"
     )
     Path(out_dbs_path).mkdir(parents=True, exist_ok=True)
 
-    # Default: save all known AppWorld apps
-    if app_names is None:
-        app_names = [
-            "amazon", "file_system", "gmail", "phone", "simple_note",
-            "splitwise", "spotify", "todoist", "venmo", "admin", "supervisor",
-        ]
+    proc = _seed_processes.get(task_id)
+    if proc is None:
+        print(f"  [save] no seed process for {task_id} — falling back to HTTP", flush=True)
+        # Fallback: try REST save
+        try:
+            import json as _j2
+            apps = app_names or [
+                "amazon","file_system","gmail","phone","simple_note",
+                "splitwise","spotify","todoist","venmo","admin","supervisor",
+            ]
+            r = requests.post(
+                f"{appworld_url}/dbs/save",
+                json={"from_db_home_path": ":memory:base",
+                      "to_db_home_path": out_dbs_path,
+                      "format": "full", "delete_if_exists": True, "app_names": apps},
+                timeout=60,
+            )
+            return r.status_code in (200, 201)
+        except Exception as e:
+            print(f"  [save] fallback error: {e}", flush=True)
+            return False
 
     try:
-        r = requests.post(
-            f"{appworld_url}/dbs/save",
-            json={
-                "from_db_home_path": ":memory:base",  # API server writes to :memory:base
-                "to_db_home_path":   out_dbs_path,
-                "format":            "full",
-                "delete_if_exists":  True,
-                "app_names":         app_names,
-            },
-            timeout=60,
-        )
-        if r.status_code not in (200, 201):
-            print(f"  [save] /dbs/save failed ({r.status_code}): {r.text[:100]}", flush=True)
-            return False
-        print(f"  [save] saved {len(app_names)} apps to disk", flush=True)
-        return True
+        import json as _j
+        proc.stdin.write("save " + out_dbs_path + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline().strip()
+        if line:
+            data = _j.loads(line)
+            if data.get("saved"):
+                print(f"  [save] native save OK → {out_dbs_path}", flush=True)
+                return True
+            print(f"  [save] failed: {data.get('error','')[:100]}", flush=True)
+        return False
     except Exception as e:
         print(f"  [save] error: {e}", flush=True)
         return False
-
 
 def _reset_task(task_id: str, appworld_url: str) -> None:
     """Close the seed subprocess (which clears task DB) after saving."""
@@ -215,19 +224,8 @@ def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
         print(f"  [eval] venv python not found at {venv_python}", flush=True)
         return 1.0 if final_state.get("done") else 0.0
 
-    # Save in-memory DB state — get task's allowed apps from specs if possible
-    task_apps = None
-    specs_path = Path(APPWORLD_ROOT) / "data" / "tasks" / task_id / "specs.json"
-    if specs_path.exists():
-        import json as _j
-        try:
-            specs = _j.loads(specs_path.read_text())
-            allowed = specs.get("allowed_apps", [])
-            if allowed:
-                task_apps = allowed + ["admin", "supervisor"]
-        except Exception:
-            pass
-    _save_task(task_id, APPWORLD_ROOT, APPWORLD_URL, app_names=task_apps)
+    # Save via native AppWorld subprocess (correct DB guaranteed)
+    _save_task(task_id, APPWORLD_ROOT, APPWORLD_URL)
 
     try:
         result = subprocess.run(
