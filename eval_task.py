@@ -2,9 +2,7 @@
 """
 Standalone AppWorld task evaluator — runs inside the appworld venv.
 Usage: python eval_task.py <task_id> <appworld_root> [experiment_name]
-Reads task output DBs from:
-  {appworld_root}/experiments/outputs/{experiment_name}/tasks/{task_id}/dbs/
-Outputs ONLY JSON to stdout.
+Outputs JSON + detailed test results to stdout.
 """
 import sys, json, os, io
 
@@ -18,7 +16,6 @@ try:
     from appworld.common.path_store import path_store
     path_store.update_root(appworld_root)
 
-    # Suppress stdout from evaluator internals
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
 
@@ -27,10 +24,17 @@ try:
         task_id=task_id,
         experiment_name=experiment_name,
         suppress_errors=True,
-        save_report=False,
+        save_report=True,   # save report so we can inspect failures
     )
 
+    captured = sys.stdout.getvalue()
     sys.stdout = old_stdout
+
+    # Print pass/fail details
+    for t in (result.passes or []):
+        print(f"  PASS: {t.get('label','?')}", file=sys.stderr)
+    for t in (result.failures or []):
+        print(f"  FAIL: {t.get('label','?')} — {t.get('requirement','')[:120]}", file=sys.stderr)
 
     print(json.dumps({
         "success":    bool(result.success),
