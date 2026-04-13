@@ -84,7 +84,7 @@ def context_dependency(results: List[TaskResult]) -> float:
 # 4. Causal Recall  (novel CCP metric)
 # ---------------------------------------------------------------------------
 
-def causal_recall(results: List[TaskResult]) -> Optional[float]:
+def causal_recall(results: List[TaskResult], method: str = "") -> Optional[float]:
     """
     Fraction of causally-active elements correctly preserved by CCP.
 
@@ -96,14 +96,18 @@ def causal_recall(results: List[TaskResult]) -> Optional[float]:
     This is a proxy for the true causal recall (which would require counterfactual
     re-runs). The ground-truth causal recall is measured in Ablation A2.
 
-    Returns None if no CCP stats are available (baselines don't compute this).
+    Returns None for non-CCP methods — causal scoring is CCP-specific.
     """
+    # Only CCP assigns φ scores; baselines have no causal scoring
+    _method = method or (results[0].method if results else "")
+    if _method and _method != "ccp":
+        return None
+
     preserved_counts = []
-    inert_discarded  = []
 
     for r in results:
         if not r.ccp_stats:
-            continue  # Baseline — skip
+            continue
 
         for stat in r.ccp_stats:
             total = stat.total_elements
@@ -112,7 +116,6 @@ def causal_recall(results: List[TaskResult]) -> Optional[float]:
             # Elements that were NOT inert (active + relevant) = preserved
             preserved = stat.active_count + stat.relevant_count
             preserved_counts.append(preserved / total)
-            inert_discarded.append(stat.inert_count / total)
 
     if not preserved_counts:
         return None
@@ -148,7 +151,8 @@ def compute_all_metrics(results: List[TaskResult], method: str = "") -> Dict[str
     Compute all 5 metrics for a set of task results.
     Returns a dict ready for printing / CSV export.
     """
-    cr = causal_recall(results)
+    _m = method or (results[0].method if results else "")
+    cr = causal_recall(results, method=_m)
     return {
         "method":               method or (results[0].method if results else ""),
         "n_tasks":              len(results),

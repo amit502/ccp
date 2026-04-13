@@ -54,25 +54,22 @@ try:
         try:
             os.makedirs(out_dir, exist_ok=True)
 
-            # Get current server paths to save from correct location
-            try:
-                dbs_now = _req.get(f"{apis_url}/dbs", timeout=5).json()
-                # Use first app's path as the active from_path
-                active_path = next(iter(dbs_now.values()), world.output_db_home_path_in_memory)
-                print(f"[seed] server active path at save time: {active_path}", file=sys.stderr, flush=True)
-            except Exception:
-                active_path = world.output_db_home_path_in_memory
+            # Always use the task-specific in-memory path set at seeding time.
+            # Do NOT rely on GET /dbs (server state can drift); world knows
+            # the canonical path for this task.
+            active_path = world.output_db_home_path_in_memory
+            print(f"[seed] saving from task DB path: {active_path}", file=sys.stderr, flush=True)
 
             app_names = list(world.task.allowed_apps) + ["admin", "supervisor"]
 
-            # AppWorld's _save_state uses format="changes"  
-            # but evaluator's ModelCollection.load can handle "full"
-            # Use "full" to avoid needing a base DB to apply changes against
+            # format="changes" is what AppWorld's own _save_state() uses and
+            # what evaluate_task() / ModelCollection.load() expects.
+            # format="full" saves from the on-disk base DB (no agent changes).
             save_remote_dbs(
                 remote_apis_url=apis_url,
                 from_db_home_path=active_path,
                 to_db_home_path=out_dir,
-                format="full",
+                format="changes",
                 app_names=app_names,
                 delete_if_exists=True,
                 skip_mandatory_apps=False,

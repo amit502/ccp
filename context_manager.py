@@ -17,7 +17,6 @@ Compression is triggered whenever total token count exceeds threshold T.
 
 from __future__ import annotations
 
-import re
 from typing import List, Tuple
 
 from .causal_scorer import score_context
@@ -231,7 +230,12 @@ class CCPContextManager:
         ))
 
         delta_pct = (1 - tokens_after / max(tokens_before, 1)) * 100
-        direction = f"-{delta_pct:.1f}% reduction" if delta_pct >= 0 else f"+{abs(delta_pct):.1f}% growth"
+        if delta_pct > 0.05:
+            direction = f"-{delta_pct:.1f}% reduction"
+        elif delta_pct < -0.05:
+            direction = f"+{abs(delta_pct):.1f}% growth"
+        else:
+            direction = "no change"
         print(
             f"[CCP] Step {self._step}: {n_before} elements → "
             f"active={len(active)}, relevant={len(relevant)}, inert={len(inert)} | "
