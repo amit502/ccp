@@ -3,14 +3,13 @@
 Seed + Save task using AppWorld Python library in the appworld venv.
 
 Protocol:
-  Prints {"success": true, "db_path": ":memory:task_output-{task_id}"}  when ready
-  Reads "save" from stdin → calls world.close() (AppWorld's own save) → prints {"saved":true}
-  Reads EOF → exits
+  Prints {"success": true, ...}  when ready
+  Reads "save <output_dir>" from stdin → saves → prints {"saved":true}
+  Reads EOF → exits without calling world.close()
 
 Args: task_id appworld_root apis_url [experiment_name]
-  experiment_name defaults to "ccp"
 """
-import sys, json, os, io, glob
+import sys, json, os, glob
 
 task_id         = sys.argv[1]
 appworld_root   = sys.argv[2]
@@ -24,66 +23,79 @@ try:
     path_store.update_root(appworld_root)
 
     from appworld import AppWorld
+    from appworld.apps.api_lib import save_remote_dbs
 
-    # Pass experiment_name so world.close() saves to the right experiment folder.
+    # NOTE: do NOT pass experiment_name here — it triggers an auto-save of the
+    # initial state inside __init__ which (a) takes time and (b) may interfere
+    # with our own save.  We compute the output path ourselves.
     world = AppWorld(
         task_id=task_id,
-        experiment_name=experiment_name,
         remote_apis_url=apis_url,
         load_ground_truth=False,
     )
 
+    # Probe what attributes are available — helps debug save options
+    _save_attrs = [a for a in dir(world)
+                   if ("save" in a.lower() or "output" in a.lower() or "path" in a.lower())
+                   and not a.startswith("__")]
+    print(f"[seed] world save/path attrs: {_save_attrs}", file=sys.stderr, flush=True)
+
     print(json.dumps({
-        "success":    True,
-        "task_id":    task_id,
-        "db_path":    world.output_db_home_path_in_memory,
-        "output_dir": str(world.output_db_home_path),
+        "success": True,
+        "task_id": task_id,
+        "db_path": world.output_db_home_path_in_memory,
     }), flush=True)
 
-    # Wait for "save" command
+    # Process commands
     for line in sys.stdin:
         line = line.strip()
-        if line != "save":
+        if not line.startswith("save "):
             if line == "exit":
                 break
             continue
 
+        out_dir = line[5:].strip()
         try:
-            # Use AppWorld's own save mechanism — world.close() is the
-            # canonical way to persist task state and is guaranteed to match
-            # what evaluate_task() expects.
-            # Suppress any incidental stdout from close().
-            _buf = io.StringIO()
-            _old = sys.stdout
-            sys.stdout = _buf
-            try:
-                world.close()
-            finally:
-                sys.stdout = _old
+            os.makedirs(out_dir, exist_ok=True)
+
+            active_path = world.output_db_home_path_in_memory
+            print(f"[seed] saving from: {active_path} → {out_dir}", file=sys.stderr, flush=True)
+
+            app_names = list(world.task.allowed_apps) + ["admin", "supervisor"]
+
+            save_remote_dbs(
+                remote_apis_url=apis_url,
+                from_db_home_path=active_path,
+                to_db_home_path=out_dir,
+                format="changes",
+                app_names=app_names,
+                delete_if_exists=True,
+                skip_mandatory_apps=False,
+                save_model_hashes=True,
+            )
 
             # Verify what was saved
-            out_dir = str(world.output_db_home_path)
             saved = {
                 os.path.basename(f): os.path.getsize(f)
                 for f in glob.glob(os.path.join(out_dir, "*"))
             }
-            print(f"[seed] close() saved to: {out_dir}", file=sys.stderr, flush=True)
-            print(f"[seed] files: {saved}", file=sys.stderr, flush=True)
+            print(f"[seed] saved files: {saved}", file=sys.stderr, flush=True)
 
-            # Peek at venmo.jsonl content for diagnosis
+            # Peek at venmo.jsonl
             venmo_path = os.path.join(out_dir, "venmo.jsonl")
             if os.path.exists(venmo_path):
-                with open(venmo_path) as _vf:
-                    _preview = _vf.read(300)
-                print(f"[seed] venmo.jsonl preview: {_preview!r}", file=sys.stderr, flush=True)
+                with open(venmo_path) as _f:
+                    _preview = _f.read(400)
+                print(f"[seed] venmo.jsonl ({os.path.getsize(venmo_path)}B): {_preview!r}",
+                      file=sys.stderr, flush=True)
             else:
-                print("[seed] venmo.jsonl NOT FOUND after close()", file=sys.stderr, flush=True)
+                print("[seed] venmo.jsonl NOT FOUND", file=sys.stderr, flush=True)
 
             print(json.dumps({
-                "saved":  True,
-                "dir":    out_dir,
-                "method": "world.close()",
-                "files":  len(saved),
+                "saved": True,
+                "dir":   out_dir,
+                "from":  active_path,
+                "files": len(saved),
             }), flush=True)
 
         except Exception as e:
@@ -91,10 +103,7 @@ try:
             traceback.print_exc(file=sys.stderr)
             print(json.dumps({"saved": False, "error": str(e)}), flush=True)
 
-        # After close() the server is reset; exit so a fresh subprocess handles
-        # the next task.
-        break
-
+    # Exit without world.close() — keeps server state alive
     os._exit(0)
 
 except Exception as e:

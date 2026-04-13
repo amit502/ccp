@@ -112,23 +112,19 @@ def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[
 _seed_processes: dict = {}
 
 
-_EXPERIMENT_NAME: str = os.environ.get("EXPERIMENT_NAME", "ccp")
-
-
-def _seed_task(task: Any, appworld_root: str, appworld_url: str,
-               experiment_name: str = "") -> bool:
+def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
     """
     Seed a task using AppWorld Python library (appworld venv subprocess).
-    Passes experiment_name so world.close() saves to the correct folder.
+    Keeps the subprocess alive during agent execution so AppWorld doesn't
+    clear the task DB from the APIs server memory on close.
     """
     import subprocess, json as _json
     seed_script = str(Path(__file__).parent.parent / "seed_task.py")
     venv_python  = str(Path(APPWORLD_ROOT_VENV) / "bin" / "python3")
-    exp_name = experiment_name or _EXPERIMENT_NAME
 
     try:
         proc = subprocess.Popen(
-            [venv_python, seed_script, task.id, appworld_root, appworld_url, exp_name],
+            [venv_python, seed_script, task.id, appworld_root, appworld_url],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -140,7 +136,7 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str,
             data = _json.loads(line)
             if data.get("success"):
                 _seed_processes[task.id] = proc
-                print(f"  [seed] ready: db={data.get('db_path','')} out={data.get('output_dir','')}", flush=True)
+                print(f"  [seed] ready: db={data.get('db_path','')}", flush=True)
                 return True
             print(f"  [seed] failed: {data.get('error','')[:100]}", flush=True)
             proc.kill()
@@ -153,11 +149,18 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str,
         return False
 
 
-def _save_task(task_id: str, *_) -> bool:
+def _save_task(task_id: str, appworld_root: str, appworld_url: str,
+               experiment_name: str = "ccp",
+               app_names: list = None) -> bool:
     """
-    Save task state by sending "save" to the seed subprocess.
-    The subprocess calls world.close() — AppWorld's own canonical save.
+    Save task state via the seed subprocess.
+    Sends "save <dir>" — subprocess calls save_remote_dbs(format="changes").
     """
+    out_dbs_path = str(
+        Path(appworld_root) / "experiments" / "outputs" / experiment_name / "tasks" / task_id / "dbs"
+    )
+    Path(out_dbs_path).mkdir(parents=True, exist_ok=True)
+
     proc = _seed_processes.get(task_id)
     if proc is None:
         print(f"  [save] no seed process for {task_id} — cannot save", flush=True)
@@ -165,14 +168,13 @@ def _save_task(task_id: str, *_) -> bool:
 
     try:
         import json as _j
-        # New protocol: just "save" (no dir) — subprocess uses world.output_db_home_path
-        proc.stdin.write("save\n")
+        proc.stdin.write("save " + out_dbs_path + "\n")
         proc.stdin.flush()
         line = proc.stdout.readline().strip()
         if line:
             data = _j.loads(line)
             if data.get("saved"):
-                print(f"  [save] world.close() OK → {data.get('dir','')} ({data.get('files',0)} files)", flush=True)
+                print(f"  [save] OK → {out_dbs_path} ({data.get('files',0)} files)", flush=True)
                 return True
             print(f"  [save] failed: {data.get('error','')[:100]}", flush=True)
         return False
