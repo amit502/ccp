@@ -60,22 +60,24 @@ def context_dependency(results: List[TaskResult]) -> float:
     auc_values = []
 
     for r in results:
-        if r.ccp_stats:
-            # We have per-compression-event snapshots
-            steps  = [s.step for s in r.ccp_stats]
+        if r.ccp_stats and len(r.ccp_stats) > 1:
+            # Multiple compression events — compute trapezoidal AUC
+            steps  = [s.step   for s in r.ccp_stats]
             tokens = [s.tokens_after for s in r.ccp_stats]
-            # Trapezoidal AUC normalised by total steps
-            if len(steps) > 1:
-                auc = sum(
-                    (tokens[i] + tokens[i-1]) / 2 * (steps[i] - steps[i-1])
-                    for i in range(1, len(steps))
-                )
-                auc_values.append(auc / max(r.steps, 1))
-            else:
-                auc_values.append(r.peak_tokens)
+            auc = sum(
+                (tokens[i] + tokens[i-1]) / 2 * (steps[i] - steps[i-1])
+                for i in range(1, len(steps))
+            )
+            auc_values.append(auc / max(r.steps, 1))
+        elif r.ccp_stats:
+            # Single compression event — use tokens_after from that event
+            auc_values.append(r.ccp_stats[-1].tokens_after)
         else:
-            # Proxy for baselines
-            auc_values.append(r.peak_tokens)
+            # No compression events (never exceeded threshold).
+            # Use total_tokens (final context size) as the proxy — it equals
+            # peak_tokens for no-compression methods and is a tighter bound
+            # than always reporting peak for methods that compressed.
+            auc_values.append(r.total_tokens)
 
     return sum(auc_values) / len(auc_values) if auc_values else 0.0
 

@@ -58,14 +58,19 @@ try:
         try:
             os.makedirs(out_dir, exist_ok=True)
 
-            active_path = world.output_db_home_path_in_memory
-            print(f"[seed] saving from: {active_path} → {out_dir}", file=sys.stderr, flush=True)
+            # from_db_home_path is the REFERENCE BASE for the diff, not the source.
+            # diff = (current active task DB) − (from_db_home_path)
+            # Passing the task path gives diff = 0 (same DB compared against itself).
+            # Passing ":memory:base" gives diff = task_setup + agent_changes,
+            # which is what evaluate_task() expects (it subtracts models_start itself).
+            ref_path = ":memory:base"
+            print(f"[seed] saving changes vs {ref_path} → {out_dir}", file=sys.stderr, flush=True)
 
             app_names = list(world.task.allowed_apps) + ["admin", "supervisor"]
 
             save_remote_dbs(
                 remote_apis_url=apis_url,
-                from_db_home_path=active_path,
+                from_db_home_path=ref_path,
                 to_db_home_path=out_dir,
                 format="changes",
                 app_names=app_names,
