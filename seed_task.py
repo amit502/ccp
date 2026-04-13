@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Seed + Save task using AppWorld Python library in the appworld venv.
+
 Protocol:
-  - Prints {"success": true}  when seeding is done
-  - Waits on stdin for either:
-      "save <output_dir>\n"  → saves task state to disk, prints {"saved": true}
-      EOF                    → exits
+  Prints {"success": true, "db_path": ":memory:task_output-{task_id}"}  when ready
+  Reads "save <output_dir>" from stdin → saves current server state → prints {"saved":true}
+  Reads EOF → exits without calling world.close()
 """
-import sys, json, os
+import sys, json, os, requests as _req
 
 task_id       = sys.argv[1]
 appworld_root = sys.argv[2]
@@ -28,33 +28,69 @@ try:
         load_ground_truth=False,
     )
 
-    print(json.dumps({"success": True, "task_id": task_id}), flush=True)
+    # Confirm what DB path server is now using
+    try:
+        dbs = _req.get(f"{apis_url}/dbs", timeout=5).json()
+        server_venmo_path = dbs.get("venmo", world.output_db_home_path_in_memory)
+    except Exception:
+        server_venmo_path = world.output_db_home_path_in_memory
 
-    # Wait for commands
+    print(json.dumps({
+        "success": True,
+        "task_id": task_id,
+        "db_path": world.output_db_home_path_in_memory,
+        "server_path": server_venmo_path,
+    }), flush=True)
+
+    # Process commands
     for line in sys.stdin:
         line = line.strip()
-        if line.startswith("save "):
-            out_dir = line[5:].strip()
+        if not line.startswith("save "):
+            if line == "exit":
+                break
+            continue
+
+        out_dir = line[5:].strip()
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+
+            # Get current server paths to save from correct location
             try:
-                os.makedirs(out_dir, exist_ok=True)
-                app_names = list(world.task.allowed_apps) + ["admin", "supervisor"]
-                # Save with format="full" so evaluator gets complete DB state
-                save_remote_dbs(
-                    remote_apis_url=apis_url,
-                    from_db_home_path=world.output_db_home_path_in_memory,
-                    to_db_home_path=out_dir,
-                    format="full",
-                    app_names=app_names,
-                    delete_if_exists=True,
-                    skip_mandatory_apps=False,
-                )
-                print(json.dumps({"saved": True, "dir": out_dir,
-                                  "path": world.output_db_home_path_in_memory,
-                                  "apps": app_names}), flush=True)
-            except Exception as e:
-                print(json.dumps({"saved": False, "error": str(e)}), flush=True)
-        elif line == "exit":
-            break
+                dbs_now = _req.get(f"{apis_url}/dbs", timeout=5).json()
+                # Use first app's path as the active from_path
+                active_path = next(iter(dbs_now.values()), world.output_db_home_path_in_memory)
+                print(f"[seed] server active path at save time: {active_path}", file=sys.stderr, flush=True)
+            except Exception:
+                active_path = world.output_db_home_path_in_memory
+
+            app_names = list(world.task.allowed_apps) + ["admin", "supervisor"]
+
+            # AppWorld's _save_state uses format="changes"  
+            # but evaluator's ModelCollection.load can handle "full"
+            # Use "full" to avoid needing a base DB to apply changes against
+            save_remote_dbs(
+                remote_apis_url=apis_url,
+                from_db_home_path=active_path,
+                to_db_home_path=out_dir,
+                format="full",
+                app_names=app_names,
+                delete_if_exists=True,
+                skip_mandatory_apps=False,
+                save_model_hashes=True,
+            )
+            print(json.dumps({
+                "saved": True,
+                "dir": out_dir,
+                "from": active_path,
+                "apps": len(app_names),
+            }), flush=True)
+        except Exception as e:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            print(json.dumps({"saved": False, "error": str(e)}), flush=True)
+
+    # Exit without world.close() — keeps server state for other purposes
+    os._exit(0)
 
 except Exception as e:
     print(json.dumps({"success": False, "error": str(e)}), flush=True)

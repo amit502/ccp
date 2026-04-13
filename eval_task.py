@@ -2,7 +2,6 @@
 """
 Standalone AppWorld task evaluator — runs inside the appworld venv.
 Usage: python eval_task.py <task_id> <appworld_root> [experiment_name]
-Outputs JSON + detailed test results to stdout.
 """
 import sys, json, os, io
 
@@ -16,6 +15,15 @@ try:
     from appworld.common.path_store import path_store
     path_store.update_root(appworld_root)
 
+    # Check the output dir exists and has files
+    out_dbs = os.path.join(appworld_root, "experiments", "outputs",
+                           experiment_name, "tasks", task_id, "dbs")
+    if os.path.exists(out_dbs):
+        files = os.listdir(out_dbs)
+        print(f"[eval_task] output dbs dir has {len(files)} files: {files[:5]}", file=sys.stderr)
+    else:
+        print(f"[eval_task] output dbs dir NOT FOUND: {out_dbs}", file=sys.stderr)
+
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
 
@@ -24,17 +32,16 @@ try:
         task_id=task_id,
         experiment_name=experiment_name,
         suppress_errors=True,
-        save_report=True,   # save report so we can inspect failures
+        save_report=True,
     )
 
-    captured = sys.stdout.getvalue()
     sys.stdout = old_stdout
 
-    # Print pass/fail details
     for t in (result.passes or []):
         print(f"  PASS: {t.get('label','?')}", file=sys.stderr)
     for t in (result.failures or []):
-        print(f"  FAIL: {t.get('label','?')} — {t.get('requirement','')[:120]}", file=sys.stderr)
+        req = t.get('requirement', '')[:150]
+        print(f"  FAIL: {t.get('label','?')} — {req}", file=sys.stderr)
 
     print(json.dumps({
         "success":    bool(result.success),
@@ -49,3 +56,5 @@ except Exception as e:
         pass
     print(json.dumps({"success": False, "error": str(e)}))
     print(f"[eval_task] error: {e}", file=sys.stderr)
+    import traceback
+    traceback.print_exc(file=sys.stderr)
