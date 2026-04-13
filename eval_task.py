@@ -21,6 +21,15 @@ try:
     if os.path.exists(out_dbs):
         files = os.listdir(out_dbs)
         print(f"[eval_task] output dbs dir has {len(files)} files: {files[:5]}", file=sys.stderr)
+        # Peek at venmo.jsonl to confirm agent changes are present
+        import glob as _glob
+        for jl in sorted(_glob.glob(os.path.join(out_dbs, "*.jsonl")))[:4]:
+            try:
+                with open(jl) as _f:
+                    _preview = _f.read(300).strip()
+                print(f"[eval_task] {os.path.basename(jl)} ({os.path.getsize(jl)}B): {_preview!r}", file=sys.stderr)
+            except Exception as _e:
+                print(f"[eval_task] {os.path.basename(jl)}: read error {_e}", file=sys.stderr)
     else:
         print(f"[eval_task] output dbs dir NOT FOUND: {out_dbs}", file=sys.stderr)
 
