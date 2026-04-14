@@ -134,22 +134,29 @@ try:
                           for k in ("save","close","output","path","db","dump","export"))]
     print(f"[seed_task] save_attrs: {_save_attrs}", file=sys.stderr, flush=True)
 
-    # Dump supervisor OpenAPI paths so we know what endpoints exist
+    # Fetch supervisor OpenAPI — include paths in ready signal (stdout) so they show in logs
+    _sv_paths = []
     try:
         r = requests.get(f"{apis_url}/supervisor/openapi.json", timeout=5)
         if r.status_code == 200:
-            sv_paths = list(r.json().get("paths", {}).keys())
-            print(f"[seed_task] supervisor paths: {sv_paths}", file=sys.stderr, flush=True)
-        else:
-            print(f"[seed_task] supervisor spec: HTTP {r.status_code}", file=sys.stderr, flush=True)
+            _sv_paths = list(r.json().get("paths", {}).keys())
     except Exception as e_spec:
         print(f"[seed_task] supervisor spec error: {e_spec}", file=sys.stderr, flush=True)
+
+    # Also expose world.apis attribute names (one level deep)
+    _apis_attrs = []
+    try:
+        _apis_attrs = [a for a in dir(world.apis) if not a.startswith("_")]
+    except Exception:
+        pass
 
     print(json.dumps({
         "success":    True,
         "task_id":    task_id,
         "db_path":    world.output_db_home_path_in_memory,
         "save_attrs": _save_attrs,
+        "sv_paths":   _sv_paths,
+        "apis_attrs": _apis_attrs,
     }), flush=True)
 
     # -----------------------------------------------------------------------

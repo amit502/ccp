@@ -25,8 +25,8 @@ try:
         import glob as _glob
         all_jl = sorted(_glob.glob(os.path.join(out_dbs, "*.jsonl")))
         # Always print venmo first, then up to 3 others for context
-        priority = [j for j in all_jl if "venmo" in j]
-        others   = [j for j in all_jl if "venmo" not in j][:3]
+        priority = [j for j in all_jl if "venmo" in j or "supervisor" in j]
+        others   = [j for j in all_jl if "venmo" not in j and "supervisor" not in j][:2]
         for jl in priority + others:
             try:
                 sz = os.path.getsize(jl)

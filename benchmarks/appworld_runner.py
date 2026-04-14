@@ -136,8 +136,10 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
             data = _json.loads(line)
             if data.get("success"):
                 _seed_processes[task.id] = proc
-                print(f"  [seed] ready: db={data.get('db_path','')} "
-                      f"save_attrs={data.get('save_attrs',[])}", flush=True)
+                print(f"  [seed] ready: db={data.get('db_path','')}", flush=True)
+                print(f"  [seed] save_attrs={data.get('save_attrs',[])}", flush=True)
+                print(f"  [seed] sv_paths={data.get('sv_paths',[])}", flush=True)
+                print(f"  [seed] apis_attrs={data.get('apis_attrs',[])}", flush=True)
                 return True
             print(f"  [seed] failed: {data.get('error','')[:100]}", flush=True)
             proc.kill()
