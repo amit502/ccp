@@ -228,6 +228,15 @@ class AppWorldMCPServer:
                 if "access_token" in _body:
                     _qp["access_token"] = _body.pop("access_token")
 
+                # AppWorld field-name normalisation:
+                # The venmo OpenAPI spec exposes "note"/"privacy" but the DB stores
+                # "description"/"private".  Send BOTH so whichever the handler reads works.
+                if app == "venmo" and http_m in ("post", "put", "patch"):
+                    if "note" in _body and "description" not in _body:
+                        _body["description"] = _body["note"]
+                    if "privacy" in _body and "private" not in _body:
+                        _body["private"] = (_body["privacy"] == "private")
+
                 # Also send token in Authorization header (some endpoints check header)
                 _headers = {}
                 if _qp.get("access_token"):

@@ -25,13 +25,15 @@ try:
         import glob as _glob
         all_jl = sorted(_glob.glob(os.path.join(out_dbs, "*.jsonl")))
         # Always print venmo first, then up to 3 others for context
+        # Print all non-zero files + venmo + supervisor
         priority = [j for j in all_jl if "venmo" in j or "supervisor" in j]
-        others   = [j for j in all_jl if "venmo" not in j and "supervisor" not in j][:2]
-        for jl in priority + others:
+        nonzero  = [j for j in all_jl if os.path.getsize(j) > 0 and j not in priority]
+        for jl in priority + nonzero:
             try:
                 sz = os.path.getsize(jl)
+                limit = 1500 if "supervisor" in jl else 600
                 with open(jl) as _f:
-                    _preview = _f.read(400).strip()
+                    _preview = _f.read(limit).strip()
                 print(f"[eval_task] {os.path.basename(jl)} ({sz}B): {_preview!r}", file=sys.stderr)
             except Exception as _e:
                 print(f"[eval_task] {os.path.basename(jl)}: read error {_e}", file=sys.stderr)

@@ -169,14 +169,16 @@ STRICT SEQUENCE:
 2. Call supervisor__show_account_passwords_account_passwords_get → get credentials
 3. Login: venmo__login_auth_token_post with {{"username": "<email_from_passwords>", "password": "<password>"}}
    - Use the supervisor email (e.g. nicholas.weber@gmail.com) as username
-4. 4. Find recipient's Venmo email using Venmo search:
+4. Find recipient's Venmo email using Venmo search:
    venmo__search_users_users_get {{"query":"<recipient_name>"}}
    Use the "email" field from the Venmo result as user_email
    (Venmo emails differ from Gmail — always search Venmo directly)
 5. Execute with EXACT field names:
    - REQUEST money FROM someone: venmo__create_payment_request_payment_requests_post → user_email=<recipient_email>
    - SEND money TO someone: venmo__create_transaction_transactions_post → receiver_email=<recipient_email>
-6. Call finish ONLY after completing all actions
+6. REQUIRED: Call supervisor__create_message_message_post with {{"message": "<summary of what you did>"}}
+   This records your answer for evaluation — skip this and the task FAILS.
+7. Call finish ONLY after step 6 is done
 
 TOOL CALL: {{"action":"tool_call","tool":"<exact_tool_name>","input":{{<real_params>}}}}
 FINISH:    {{"action":"finish","answer":"<what you did>"}}
@@ -352,12 +354,19 @@ Stored credentials (use these access_tokens directly — do NOT login again if t
             answer = str(parsed.get("answer", parsed.get("result", "")))
             # Check if agent actually called any action tools (not just read tools)
             messages_so_far = state.get("messages", [])
-            action_tools_called = [
+            all_tool_calls = [
                 tc.get("name", "")
                 for m in messages_so_far if isinstance(m, AIMessage)
                 for tc in (getattr(m, "tool_calls", None) or [])
-                if tc.get("name", "").split("__")[0] not in ("supervisor",)
             ]
+            action_tools_called = [
+                n for n in all_tool_calls
+                if n.split("__")[0] not in ("supervisor",)
+            ]
+            supervisor_message_called = any(
+                "message" in n and n.startswith("supervisor__")
+                for n in all_tool_calls
+            )
             read_only_finish = (
                 not action_tools_called and
                 any(x in answer.lower() for x in [
@@ -370,6 +379,7 @@ Stored credentials (use these access_tokens directly — do NOT login again if t
                 "task details", "active task", "completed initial",
                 "gathered", "noted", "understood",
             ])
+            # Block finish if: too early, or no real action, or supervisor message not sent
             if (trivial and state["step"] <= 5) or read_only_finish:
                 print(f"  [agent] premature finish blocked at step {state['step']}: {answer[:80]!r}", flush=True)
                 print(f"  [agent] action_tools_called={action_tools_called}", flush=True)
@@ -377,6 +387,15 @@ Stored credentials (use these access_tokens directly — do NOT login again if t
                     "name": "supervisor__show_active_task_active_task_get",
                     "args": {},
                     "id":   f"call_{state['step']}_retry",
+                    "type": "tool_call",
+                }]
+            elif not supervisor_message_called and action_tools_called:
+                # Agent completed action but forgot to call supervisor message — force it
+                print(f"  [agent] finish blocked — supervisor message not called; forcing it", flush=True)
+                tool_calls = [{
+                    "name": "supervisor__create_message_message_post",
+                    "args": {"message": answer},
+                    "id":   f"call_{state['step']}_sv_msg",
                     "type": "tool_call",
                 }]
             else:
