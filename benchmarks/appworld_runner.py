@@ -174,7 +174,8 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
         if line:
             data = _j.loads(line)
             if data.get("saved"):
-                print(f"  [save] OK → {out_dbs_path} ({data.get('files',0)} files)", flush=True)
+                print(f"  [save] OK → {out_dbs_path} | {data.get('files',0)} files"
+                      f" | venmo.jsonl={data.get('venmo_bytes','?')}B", flush=True)
                 return True
             print(f"  [save] failed: {data.get('error','')[:100]}", flush=True)
         return False

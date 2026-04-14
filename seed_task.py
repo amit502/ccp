@@ -96,11 +96,13 @@ try:
             else:
                 print("[seed] venmo.jsonl NOT FOUND", file=sys.stderr, flush=True)
 
+            venmo_size = saved.get("venmo.jsonl", -1)
             print(json.dumps({
-                "saved": True,
-                "dir":   out_dir,
-                "from":  ref_path,
-                "files": len(saved),
+                "saved":      True,
+                "dir":        out_dir,
+                "from":       ref_path,
+                "files":      len(saved),
+                "venmo_bytes": venmo_size,
             }), flush=True)
 
         except Exception as e:

@@ -21,13 +21,18 @@ try:
     if os.path.exists(out_dbs):
         files = os.listdir(out_dbs)
         print(f"[eval_task] output dbs dir has {len(files)} files: {files[:5]}", file=sys.stderr)
-        # Peek at venmo.jsonl to confirm agent changes are present
+        # Show venmo.jsonl first (the key file), then a sample of others
         import glob as _glob
-        for jl in sorted(_glob.glob(os.path.join(out_dbs, "*.jsonl")))[:4]:
+        all_jl = sorted(_glob.glob(os.path.join(out_dbs, "*.jsonl")))
+        # Always print venmo first, then up to 3 others for context
+        priority = [j for j in all_jl if "venmo" in j]
+        others   = [j for j in all_jl if "venmo" not in j][:3]
+        for jl in priority + others:
             try:
+                sz = os.path.getsize(jl)
                 with open(jl) as _f:
-                    _preview = _f.read(300).strip()
-                print(f"[eval_task] {os.path.basename(jl)} ({os.path.getsize(jl)}B): {_preview!r}", file=sys.stderr)
+                    _preview = _f.read(400).strip()
+                print(f"[eval_task] {os.path.basename(jl)} ({sz}B): {_preview!r}", file=sys.stderr)
             except Exception as _e:
                 print(f"[eval_task] {os.path.basename(jl)}: read error {_e}", file=sys.stderr)
     else:
