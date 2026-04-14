@@ -30,10 +30,12 @@ experiment_name = sys.argv[4] if len(sys.argv) > 4 else "ccp"
 # REST diff helpers — must be defined before main try block
 # ---------------------------------------------------------------------------
 
-def _get_app_token(apis_url, app_name, cred):
+def _get_app_token(apis_url, app_name, cred, agent_email=""):
     """Try common OAuth + JSON login patterns to get an access token."""
-    username = (cred.get("account_name") or cred.get("username")
-                or cred.get("email") or "")
+    # Prefer agent's global email; fall back to account_name (which is the app name, not a real username)
+    username = (agent_email
+                or cred.get("email") or cred.get("username")
+                or cred.get("account_name") or "")
     password = cred.get("password") or ""
     if not username or not password:
         return None
@@ -115,10 +117,12 @@ def _rest_diff_save(task_id, appworld_root, apis_url, out_dbs_path):
           f"{json.dumps(creds_raw)[:600]}", file=sys.stderr, flush=True)
 
     # Normalise to {app_name: cred_dict}
+    # AppWorld uses "account_name" as the key (equals the app name, e.g. "venmo")
     app_creds: dict = {}
     if isinstance(creds_raw, list):
         for item in creds_raw:
-            app = item.get("app_name") or item.get("app") or ""
+            app = (item.get("app_name") or item.get("app")
+                   or item.get("account_name") or "")
             if app:
                 app_creds[app] = item
     elif isinstance(creds_raw, dict):
@@ -126,6 +130,15 @@ def _rest_diff_save(task_id, appworld_root, apis_url, out_dbs_path):
 
     print(f"[seed_task] apps with credentials: {list(app_creds.keys())}",
           file=sys.stderr, flush=True)
+
+    # Get agent's email from supervisor profile (needed as login username)
+    agent_email = ""
+    try:
+        prof = requests.get(f"{apis_url}/supervisor/profile", timeout=5).json()
+        agent_email = prof.get("email", "")
+        print(f"[seed_task] agent email: {agent_email}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
 
     written   = 0
     skipped   = []
@@ -140,7 +153,7 @@ def _rest_diff_save(task_id, appworld_root, apis_url, out_dbs_path):
             continue
 
         # ---- Login ----
-        token = _get_app_token(apis_url, app_name, app_creds[app_name])
+        token = _get_app_token(apis_url, app_name, app_creds[app_name], agent_email)
         if not token:
             skipped.append(f"{app_name}:login-failed")
             print(f"[seed_task] login failed for {app_name}", file=sys.stderr, flush=True)
@@ -263,16 +276,45 @@ try:
         rest_written = 0
         rest_skipped = []
         rest_error   = ""
+        native_method = ""
+
+        # ---- Step 0: try native world save methods discovered in save_attrs ----
+        for method_name, args in (
+            ("save_state",               (str(out_dbs),)),
+            ("models_to_db_home_path",   (str(out_dbs),)),
+            ("save_state",               ()),          # no-arg variant
+        ):
+            fn = getattr(world, method_name, None)
+            if fn is None:
+                continue
+            try:
+                print(f"[seed_task] trying world.{method_name}({args})",
+                      file=sys.stderr, flush=True)
+                fn(*args)
+                native_method = method_name
+                print(f"[seed_task] world.{method_name} succeeded",
+                      file=sys.stderr, flush=True)
+                break
+            except Exception as e_nat:
+                print(f"[seed_task] world.{method_name} failed: {e_nat}",
+                      file=sys.stderr, flush=True)
+
+        # Check if native method wrote venmo.jsonl
+        venmo_after_native = (out_dbs / "venmo.jsonl").stat().st_size \
+                             if (out_dbs / "venmo.jsonl").exists() else 0
+        print(f"[seed_task] after native methods: venmo={venmo_after_native}B "
+              f"native_method={native_method!r}", file=sys.stderr, flush=True)
 
         # ---- Step 1: REST diff (writes app-specific .jsonl files) ----
-        try:
-            rest_written, rest_skipped = _rest_diff_save(
-                task_id, appworld_root, apis_url, str(out_dbs)
-            )
-        except Exception as e_diff:
-            rest_error = str(e_diff)[:300]
-            print(f"[seed_task] rest_diff error: {e_diff}", file=sys.stderr, flush=True)
-            import traceback; traceback.print_exc(file=sys.stderr)
+        if venmo_after_native == 0:  # only if native method didn't capture venmo
+            try:
+                rest_written, rest_skipped = _rest_diff_save(
+                    task_id, appworld_root, apis_url, str(out_dbs)
+                )
+            except Exception as e_diff:
+                rest_error = str(e_diff)[:300]
+                print(f"[seed_task] rest_diff error: {e_diff}", file=sys.stderr, flush=True)
+                import traceback; traceback.print_exc(file=sys.stderr)
 
         # ---- Step 2: world.close() — writes supervisor.jsonl + cleanup ----
         close_error = ""
@@ -297,13 +339,13 @@ try:
               file=sys.stderr, flush=True)
 
         print(json.dumps({
-            "saved":        True,
-            "method":       f"rest_diff+close ({rest_written} new records)",
-            "rest_error":   rest_error,
-            "close_error":  close_error,
-            "skipped":      rest_skipped,
-            "venmo_bytes":  venmo_bytes,
-            "nonzero":      len(nonzero),
+            "saved":         True,
+            "method":        f"native={native_method or 'none'} rest={rest_written}recs close=done",
+            "rest_error":    rest_error,
+            "close_error":   close_error,
+            "skipped":       rest_skipped,
+            "venmo_bytes":   venmo_bytes,
+            "nonzero":       len(nonzero),
         }), flush=True)
 
         break
