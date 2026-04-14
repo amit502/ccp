@@ -127,7 +127,7 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
             [venv_python, seed_script, task.id, appworld_root, appworld_url],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=None,   # inherit parent stderr → shows in pod logs
             text=True,
         )
         # Read the ready signal

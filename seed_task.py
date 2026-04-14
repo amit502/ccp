@@ -4,18 +4,113 @@ Seed + Save task using AppWorld Python library in the appworld venv.
 
 Protocol:
   Prints {"success": true, ...}  when ready
-  Reads "save" from stdin → calls save_remote_dbs() → prints {"saved":true}
+  Reads "save" from stdin → saves task output → prints {"saved":true}
   Reads EOF → exits
+
+Save strategy (in order of preference):
+  1. Native world method: save_output_dbs / dump_output_dbs / export_output_dbs
+  2. Supervisor REST API export endpoint
+  3. SQLite diff: initial disk DBs vs current server state via supervisor REST
 
 Args: task_id appworld_root apis_url [experiment_name]
 """
-import sys, json, os, io
+import sys, json, os, io, sqlite3
+import requests
 from pathlib import Path
 
 task_id         = sys.argv[1]
 appworld_root   = sys.argv[2]
-apis_url        = sys.argv[3]
+apis_url        = sys.argv[3].rstrip("/")
 experiment_name = sys.argv[4] if len(sys.argv) > 4 else "ccp"
+
+
+# ---------------------------------------------------------------------------
+# Strategy 3: SQLite diff helper (defined before main try so it's in scope)
+# ---------------------------------------------------------------------------
+
+def _sqlite_diff_save(task_id, appworld_root, apis_url, out_dbs_str):
+    """
+    Compare each app's on-disk initial SQLite DB against current server state
+    (queried via supervisor REST API), write changed records to out_dbs/*.jsonl.
+
+    Returns (success: bool, method_description: str).
+    """
+    initial_dbs = Path(appworld_root) / "data" / "tasks" / task_id / "dbs"
+    out_dbs     = Path(out_dbs_str)
+
+    if not initial_dbs.exists():
+        raise FileNotFoundError(f"initial dbs not found: {initial_dbs}")
+
+    # Fetch supervisor OpenAPI to discover record-listing endpoints
+    try:
+        spec     = requests.get(f"{apis_url}/supervisor/openapi.json", timeout=5).json()
+        sv_paths = list(spec.get("paths", {}).keys())
+    except Exception:
+        sv_paths = []
+
+    print(f"[seed_task] sqldiff: supervisor paths={sv_paths[:30]}", file=sys.stderr, flush=True)
+
+    written = 0
+    for db_file in sorted(initial_dbs.glob("*.db")):
+        app_name = db_file.stem   # e.g. "venmo"
+        out_file = out_dbs / f"{app_name}.jsonl"
+
+        # Read initial record IDs from disk SQLite
+        initial_ids_by_table: dict = {}
+        try:
+            conn = sqlite3.connect(str(db_file))
+            conn.row_factory = sqlite3.Row
+            tables = [row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )]
+            for tbl in tables:
+                try:
+                    rows = conn.execute(f"SELECT id FROM {tbl}").fetchall()
+                    initial_ids_by_table[tbl] = {row[0] for row in rows}
+                except Exception:
+                    pass
+            conn.close()
+        except Exception as e_db:
+            print(f"[seed_task] sqldiff: cannot read {db_file}: {e_db}", file=sys.stderr)
+            continue
+
+        # Try to get current records via supervisor list endpoints
+        new_records = []
+        for tbl in initial_ids_by_table:
+            # Try common URL patterns
+            for url_pat in (
+                f"{apis_url}/supervisor/{app_name}/{tbl}",
+                f"{apis_url}/supervisor/{app_name}/{tbl}/list",
+                f"{apis_url}/{app_name}/supervisor/{tbl}",
+            ):
+                try:
+                    r = requests.get(url_pat, timeout=10)
+                    if r.status_code == 200:
+                        data    = r.json()
+                        records = data if isinstance(data, list) else data.get("data", [])
+                        init_ids = initial_ids_by_table[tbl]
+                        for rec in records:
+                            rid = rec.get("id")
+                            if rid is not None and rid not in init_ids:
+                                new_records.append(rec)
+                        break
+                except Exception:
+                    pass
+
+        if new_records:
+            with open(out_file, "w") as f:
+                for rec in new_records:
+                    f.write(json.dumps(rec) + "\n")
+            written += len(new_records)
+            print(f"[seed_task] sqldiff: wrote {len(new_records)} records to {out_file.name}",
+                  file=sys.stderr, flush=True)
+
+    return written > 0, f"sqldiff ({written} new records)"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 try:
     os.environ["APPWORLD_ROOT"] = appworld_root
@@ -32,11 +127,23 @@ try:
         load_ground_truth=False,
     )
 
-    # Expose available attrs for debugging (goes to runner log via stderr)
-    _all_attrs = [a for a in dir(world) if not a.startswith("__")]
+    # Collect all non-dunder attributes for debugging
+    _all_attrs  = [a for a in dir(world) if not a.startswith("__")]
     _save_attrs = [a for a in _all_attrs
-                   if any(k in a.lower() for k in ("save","close","output","path","db"))]
+                   if any(k in a.lower()
+                          for k in ("save","close","output","path","db","dump","export"))]
     print(f"[seed_task] save_attrs: {_save_attrs}", file=sys.stderr, flush=True)
+
+    # Dump supervisor OpenAPI paths so we know what endpoints exist
+    try:
+        r = requests.get(f"{apis_url}/supervisor/openapi.json", timeout=5)
+        if r.status_code == 200:
+            sv_paths = list(r.json().get("paths", {}).keys())
+            print(f"[seed_task] supervisor paths: {sv_paths}", file=sys.stderr, flush=True)
+        else:
+            print(f"[seed_task] supervisor spec: HTTP {r.status_code}", file=sys.stderr, flush=True)
+    except Exception as e_spec:
+        print(f"[seed_task] supervisor spec error: {e_spec}", file=sys.stderr, flush=True)
 
     print(json.dumps({
         "success":    True,
@@ -45,7 +152,9 @@ try:
         "save_attrs": _save_attrs,
     }), flush=True)
 
+    # -----------------------------------------------------------------------
     # Wait for "save" command
+    # -----------------------------------------------------------------------
     for line in sys.stdin:
         cmd = line.strip()
         if cmd != "save":
@@ -53,71 +162,95 @@ try:
                 break
             continue
 
-        try:
-            # The agent made changes via REST calls to the APIs server.
-            # save_remote_dbs diffs the CURRENT in-memory server state against
-            # the task's INITIAL on-disk DB → gives exactly what the agent changed,
-            # in the JSON model-record format that evaluate_task expects.
-            initial_dbs = str(Path(appworld_root) / "data" / "tasks" / task_id / "dbs")
-            out_dbs = str(
-                Path(appworld_root) / "experiments" / "outputs"
-                / experiment_name / "tasks" / task_id / "dbs"
-            )
-            Path(out_dbs).mkdir(parents=True, exist_ok=True)
+        out_dbs = Path(appworld_root) / "experiments" / "outputs" \
+                  / experiment_name / "tasks" / task_id / "dbs"
+        out_dbs.mkdir(parents=True, exist_ok=True)
 
-            print(f"[seed_task] saving: from={initial_dbs} to={out_dbs}", file=sys.stderr, flush=True)
+        saved_ok    = False
+        save_method = "none"
+        save_error  = ""
 
-            world.save_remote_dbs(
-                out_dbs,
-                format="changes",
-                from_db_home_path=initial_dbs,
-            )
+        # ---- Strategy 1: look for a native save method on world ----
+        for method_name in ("save_output_dbs", "dump_output_dbs",
+                            "export_output_dbs", "write_output_dbs"):
+            fn = getattr(world, method_name, None)
+            if fn is not None:
+                try:
+                    fn(str(out_dbs))
+                    saved_ok    = True
+                    save_method = method_name
+                    break
+                except Exception as e_m:
+                    save_error = f"{method_name}: {e_m}"
+                    print(f"[seed_task] {save_error}", file=sys.stderr, flush=True)
 
-            # Report sizes of saved files for diagnostics
-            saved_files = list(Path(out_dbs).glob("*.jsonl"))
-            sizes = {f.name: f.stat().st_size for f in saved_files}
-            venmo_bytes = sizes.get("venmo.jsonl", 0)
-            nonzero = {k: v for k, v in sizes.items() if v > 0}
-            print(f"[seed_task] saved {len(saved_files)} files, "
-                  f"nonzero={list(nonzero.keys())}, venmo={venmo_bytes}B",
-                  file=sys.stderr, flush=True)
-
-            print(json.dumps({
-                "saved":       True,
-                "method":      "save_remote_dbs(changes,initial_dbs)",
-                "exp":         experiment_name,
-                "venmo_bytes": venmo_bytes,
-                "nonzero":     len(nonzero),
-            }), flush=True)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc(file=sys.stderr)
-            srdb_error = str(e)
-            # Fallback: try world.close() (works if world tracked the changes)
+        # ---- Strategy 2: supervisor REST export endpoint ----
+        if not saved_ok:
             try:
-                _buf = io.StringIO()
-                _old = sys.stdout
-                sys.stdout = _buf
+                for sv_path in (
+                    f"/supervisor/export_task_output/{task_id}",
+                    f"/supervisor/tasks/{task_id}/export",
+                    f"/supervisor/save/{task_id}",
+                ):
+                    for method, kw in (
+                        ("post", {"json": {"output_dir": str(out_dbs),
+                                           "experiment_name": experiment_name}}),
+                        ("get",  {"params": {"output_dir": str(out_dbs),
+                                             "experiment_name": experiment_name}}),
+                    ):
+                        r = requests.request(method, f"{apis_url}{sv_path}", timeout=30, **kw)
+                        if r.status_code == 200:
+                            saved_ok    = True
+                            save_method = f"supervisor {method.upper()} {sv_path}"
+                            break
+                    if saved_ok:
+                        break
+            except Exception as e_sv:
+                save_error += f" | supervisor: {e_sv}"
+                print(f"[seed_task] supervisor export error: {e_sv}", file=sys.stderr, flush=True)
+
+        # ---- Strategy 3: SQLite diff ----
+        if not saved_ok:
+            try:
+                saved_ok, save_method = _sqlite_diff_save(
+                    task_id, appworld_root, apis_url, str(out_dbs)
+                )
+            except Exception as e_diff:
+                save_error += f" | sqldiff: {e_diff}"
+                print(f"[seed_task] sqldiff error: {e_diff}", file=sys.stderr, flush=True)
+                import traceback; traceback.print_exc(file=sys.stderr)
+
+        # ---- Fallback: world.close() ----
+        if not saved_ok:
+            try:
+                _buf = io.StringIO(); _old = sys.stdout; sys.stdout = _buf
                 try:
                     world.close()
                 finally:
                     sys.stdout = _old
-                print(json.dumps({
-                    "saved":       True,
-                    "method":      "world.close() [fallback]",
-                    "srdb_error":  srdb_error,
-                    "exp":         experiment_name,
-                }), flush=True)
-            except Exception as e2:
-                print(json.dumps({
-                    "saved":      False,
-                    "srdb_error": srdb_error,
-                    "error":      str(e2),
-                }), flush=True)
+                save_method = "world.close() [0-byte fallback]"
+                saved_ok    = True
+            except Exception as e_c:
+                save_error += f" | close: {e_c}"
 
-        # After saving, exit so a fresh subprocess can seed the next task.
-        break
+        # Report file sizes
+        saved_files = list(out_dbs.glob("*.jsonl"))
+        sizes       = {f.name: f.stat().st_size for f in saved_files}
+        venmo_bytes = sizes.get("venmo.jsonl", 0)
+        nonzero     = {k: v for k, v in sizes.items() if v > 0}
+        print(f"[seed_task] result '{save_method}': "
+              f"venmo={venmo_bytes}B nonzero={list(nonzero.keys())}",
+              file=sys.stderr, flush=True)
+
+        print(json.dumps({
+            "saved":       saved_ok,
+            "method":      save_method,
+            "save_error":  save_error[:300] if save_error else "",
+            "venmo_bytes": venmo_bytes,
+            "nonzero":     len(nonzero),
+        }), flush=True)
+
+        break   # one save per subprocess lifetime
 
     os._exit(0)
 
