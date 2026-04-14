@@ -99,7 +99,7 @@ try:
             print(json.dumps({
                 "saved": True,
                 "dir":   out_dir,
-                "from":  active_path,
+                "from":  ref_path,
                 "files": len(saved),
             }), flush=True)
 
