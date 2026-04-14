@@ -149,18 +149,14 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
         return False
 
 
-def _save_task(task_id: str, appworld_root: str, appworld_url: str,
+def _save_task(task_id: str, _appworld_root: str, _appworld_url: str,
                experiment_name: str = "ccp",
                app_names: list = None) -> bool:
     """
     Save task state via the seed subprocess.
-    Sends "save <dir>" — subprocess calls save_remote_dbs(format="changes").
+    Sends "save" — subprocess calls world.close() which determines the output
+    path internally from experiment_name passed at construction time.
     """
-    out_dbs_path = str(
-        Path(appworld_root) / "experiments" / "outputs" / experiment_name / "tasks" / task_id / "dbs"
-    )
-    Path(out_dbs_path).mkdir(parents=True, exist_ok=True)
-
     proc = _seed_processes.get(task_id)
     if proc is None:
         print(f"  [save] no seed process for {task_id} — cannot save", flush=True)
@@ -168,14 +164,14 @@ def _save_task(task_id: str, appworld_root: str, appworld_url: str,
 
     try:
         import json as _j
-        proc.stdin.write("save " + out_dbs_path + "\n")
+        proc.stdin.write("save\n")
         proc.stdin.flush()
         line = proc.stdout.readline().strip()
         if line:
             data = _j.loads(line)
             if data.get("saved"):
-                print(f"  [save] OK → {out_dbs_path} | {data.get('files',0)} files"
-                      f" | venmo.jsonl={data.get('venmo_bytes','?')}B", flush=True)
+                print(f"  [save] OK via {data.get('method','world.close()')} "
+                      f"exp={data.get('exp', experiment_name)}", flush=True)
                 return True
             print(f"  [save] failed: {data.get('error','')[:100]}", flush=True)
         return False

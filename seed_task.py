@@ -4,12 +4,12 @@ Seed + Save task using AppWorld Python library in the appworld venv.
 
 Protocol:
   Prints {"success": true, ...}  when ready
-  Reads "save <output_dir>" from stdin → saves → prints {"saved":true}
-  Reads EOF → exits without calling world.close()
+  Reads "save" from stdin → calls world.close() → prints {"saved":true}
+  Reads EOF → exits
 
 Args: task_id appworld_root apis_url [experiment_name]
 """
-import sys, json, os, glob
+import sys, json, os, io
 
 task_id         = sys.argv[1]
 appworld_root   = sys.argv[2]
@@ -23,86 +23,51 @@ try:
     path_store.update_root(appworld_root)
 
     from appworld import AppWorld
-    from appworld.apps.api_lib import save_remote_dbs
 
-    # NOTE: do NOT pass experiment_name here — it triggers an auto-save of the
-    # initial state inside __init__ which (a) takes time and (b) may interfere
-    # with our own save.  We compute the output path ourselves.
+    # Pass experiment_name so world.close() saves to the correct folder.
+    # NOTE: do NOT access world.output_db_home_path — that attr may not exist
+    # in this version of AppWorld; close() computes the path internally.
     world = AppWorld(
         task_id=task_id,
+        experiment_name=experiment_name,
         remote_apis_url=apis_url,
         load_ground_truth=False,
     )
 
-    # Probe what attributes are available — helps debug save options
-    _save_attrs = [a for a in dir(world)
-                   if ("save" in a.lower() or "output" in a.lower() or "path" in a.lower())
-                   and not a.startswith("__")]
-    print(f"[seed] world save/path attrs: {_save_attrs}", file=sys.stderr, flush=True)
+    # Expose available attrs for debugging (goes to runner log)
+    _all_attrs = [a for a in dir(world) if not a.startswith("__")]
+    _save_attrs = [a for a in _all_attrs
+                   if any(k in a.lower() for k in ("save","close","output","path","db"))]
 
     print(json.dumps({
-        "success": True,
-        "task_id": task_id,
-        "db_path": world.output_db_home_path_in_memory,
+        "success":    True,
+        "task_id":    task_id,
+        "db_path":    world.output_db_home_path_in_memory,
+        "save_attrs": _save_attrs,
     }), flush=True)
 
-    # Process commands
+    # Wait for "save" command
     for line in sys.stdin:
-        line = line.strip()
-        if not line.startswith("save "):
-            if line == "exit":
+        cmd = line.strip()
+        if cmd != "save":
+            if cmd == "exit":
                 break
             continue
 
-        out_dir = line[5:].strip()
         try:
-            os.makedirs(out_dir, exist_ok=True)
+            # Suppress any stdout AppWorld might emit during close()
+            _buf = io.StringIO()
+            _old = sys.stdout
+            sys.stdout = _buf
+            try:
+                world.close()
+            finally:
+                sys.stdout = _old
 
-            # from_db_home_path is the REFERENCE BASE for the diff, not the source.
-            # diff = (current active task DB) − (from_db_home_path)
-            # Passing the task path gives diff = 0 (same DB compared against itself).
-            # Passing ":memory:base" gives diff = task_setup + agent_changes,
-            # which is what evaluate_task() expects (it subtracts models_start itself).
-            ref_path = ":memory:base"
-            print(f"[seed] saving changes vs {ref_path} → {out_dir}", file=sys.stderr, flush=True)
-
-            app_names = list(world.task.allowed_apps) + ["admin", "supervisor"]
-
-            save_remote_dbs(
-                remote_apis_url=apis_url,
-                from_db_home_path=ref_path,
-                to_db_home_path=out_dir,
-                format="changes",
-                app_names=app_names,
-                delete_if_exists=True,
-                skip_mandatory_apps=False,
-                save_model_hashes=True,
-            )
-
-            # Verify what was saved
-            saved = {
-                os.path.basename(f): os.path.getsize(f)
-                for f in glob.glob(os.path.join(out_dir, "*"))
-            }
-            print(f"[seed] saved files: {saved}", file=sys.stderr, flush=True)
-
-            # Peek at venmo.jsonl
-            venmo_path = os.path.join(out_dir, "venmo.jsonl")
-            if os.path.exists(venmo_path):
-                with open(venmo_path) as _f:
-                    _preview = _f.read(400)
-                print(f"[seed] venmo.jsonl ({os.path.getsize(venmo_path)}B): {_preview!r}",
-                      file=sys.stderr, flush=True)
-            else:
-                print("[seed] venmo.jsonl NOT FOUND", file=sys.stderr, flush=True)
-
-            venmo_size = saved.get("venmo.jsonl", -1)
             print(json.dumps({
-                "saved":      True,
-                "dir":        out_dir,
-                "from":       ref_path,
-                "files":      len(saved),
-                "venmo_bytes": venmo_size,
+                "saved":  True,
+                "method": "world.close()",
+                "exp":    experiment_name,
             }), flush=True)
 
         except Exception as e:
@@ -110,7 +75,10 @@ try:
             traceback.print_exc(file=sys.stderr)
             print(json.dumps({"saved": False, "error": str(e)}), flush=True)
 
-    # Exit without world.close() — keeps server state alive
+        # After close() the server DB is reset; exit so a fresh subprocess
+        # can seed the next task cleanly.
+        break
+
     os._exit(0)
 
 except Exception as e:
