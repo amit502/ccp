@@ -7,10 +7,12 @@ Protocol:
   Reads "save" from stdin → saves task output → prints {"saved":true}
   Reads EOF → exits
 
-Save strategy (in order of preference):
-  1. Native world method: save_output_dbs / dump_output_dbs / export_output_dbs
-  2. Supervisor REST API export endpoint
-  3. SQLite diff: initial disk DBs vs current server state via supervisor REST
+Save strategy:
+  1. rest_diff: get credentials via /supervisor/account_passwords,
+     login to each app, query current records, diff against initial
+     SQLite, write SQL INSERT format (same format world.close() uses)
+  2. Always also run world.close() after — it handles supervisor.jsonl +
+     DELETE /dbs/cache + DELETE /date_time cleanup.
 
 Args: task_id appworld_root apis_url [experiment_name]
 """
@@ -25,38 +27,128 @@ experiment_name = sys.argv[4] if len(sys.argv) > 4 else "ccp"
 
 
 # ---------------------------------------------------------------------------
-# Strategy 3: SQLite diff helper (defined before main try so it's in scope)
+# REST diff helpers — must be defined before main try block
 # ---------------------------------------------------------------------------
 
-def _sqlite_diff_save(task_id, appworld_root, apis_url, out_dbs_str):
-    """
-    Compare each app's on-disk initial SQLite DB against current server state
-    (queried via supervisor REST API), write changed records to out_dbs/*.jsonl.
+def _get_app_token(apis_url, app_name, cred):
+    """Try common OAuth + JSON login patterns to get an access token."""
+    username = (cred.get("account_name") or cred.get("username")
+                or cred.get("email") or "")
+    password = cred.get("password") or ""
+    if not username or not password:
+        return None
 
-    Returns (success: bool, method_description: str).
+    for login_path in (
+        f"/{app_name}/auth/token",
+        f"/{app_name}/accounts/login",
+        f"/{app_name}/login",
+    ):
+        url = f"{apis_url}{login_path}"
+        # OAuth form-data (AppWorld standard)
+        try:
+            r = requests.post(url, data={"username": username, "password": password}, timeout=10)
+            if r.status_code == 200:
+                tok = r.json().get("access_token") or r.json().get("token")
+                if tok:
+                    return tok
+        except Exception:
+            pass
+        # JSON body fallback
+        for body in ({"email": username, "password": password},
+                     {"username": username, "password": password}):
+            try:
+                r2 = requests.post(url, json=body, timeout=10)
+                if r2.status_code == 200:
+                    tok = r2.json().get("access_token") or r2.json().get("token")
+                    if tok:
+                        return tok
+            except Exception:
+                pass
+    return None
+
+
+def _query_table(apis_url, app_name, table_name, token):
+    """
+    Fetch all records for a table via the app's REST API.
+    Tries several common URL patterns.
+    Returns a list of dicts or None if not found.
+    """
+    params = {"access_token": token}
+    for url in (
+        f"{apis_url}/{app_name}/{table_name}",
+        f"{apis_url}/{app_name}/{table_name}/list",
+        f"{apis_url}/{app_name}/{table_name}s",
+    ):
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    for v in data.values():
+                        if isinstance(v, list):
+                            return v
+        except Exception:
+            pass
+    return None
+
+
+def _rest_diff_save(task_id, appworld_root, apis_url, out_dbs_path):
+    """
+    For each app that the supervisor has credentials for:
+      1. Login to the app
+      2. Enumerate all records for all tables
+      3. Diff against the task's initial SQLite state (on disk)
+      4. Write new records to out_dbs_path/{app}.jsonl in SQL INSERT format
+
+    Returns (records_written: int, skipped_apps: list).
     """
     initial_dbs = Path(appworld_root) / "data" / "tasks" / task_id / "dbs"
-    out_dbs     = Path(out_dbs_str)
+    out_dbs     = Path(out_dbs_path)
 
-    if not initial_dbs.exists():
-        raise FileNotFoundError(f"initial dbs not found: {initial_dbs}")
+    # ---- Get app credentials from supervisor ----
+    creds_r = requests.get(f"{apis_url}/supervisor/account_passwords", timeout=10)
+    creds_r.raise_for_status()
+    creds_raw = creds_r.json()
+    print(f"[seed_task] account_passwords ({len(json.dumps(creds_raw))}B): "
+          f"{json.dumps(creds_raw)[:600]}", file=sys.stderr, flush=True)
 
-    # Fetch supervisor OpenAPI to discover record-listing endpoints
-    try:
-        spec     = requests.get(f"{apis_url}/supervisor/openapi.json", timeout=5).json()
-        sv_paths = list(spec.get("paths", {}).keys())
-    except Exception:
-        sv_paths = []
+    # Normalise to {app_name: cred_dict}
+    app_creds: dict = {}
+    if isinstance(creds_raw, list):
+        for item in creds_raw:
+            app = item.get("app_name") or item.get("app") or ""
+            if app:
+                app_creds[app] = item
+    elif isinstance(creds_raw, dict):
+        app_creds = creds_raw
 
-    print(f"[seed_task] sqldiff: supervisor paths={sv_paths[:30]}", file=sys.stderr, flush=True)
+    print(f"[seed_task] apps with credentials: {list(app_creds.keys())}",
+          file=sys.stderr, flush=True)
 
-    written = 0
+    written   = 0
+    skipped   = []
+
     for db_file in sorted(initial_dbs.glob("*.db")):
-        app_name = db_file.stem   # e.g. "venmo"
-        out_file = out_dbs / f"{app_name}.jsonl"
+        app_name = db_file.stem
+        if app_name == "supervisor":
+            continue  # world.close() handles supervisor
 
-        # Read initial record IDs from disk SQLite
-        initial_ids_by_table: dict = {}
+        if app_name not in app_creds:
+            skipped.append(f"{app_name}:no-creds")
+            continue
+
+        # ---- Login ----
+        token = _get_app_token(apis_url, app_name, app_creds[app_name])
+        if not token:
+            skipped.append(f"{app_name}:login-failed")
+            print(f"[seed_task] login failed for {app_name}", file=sys.stderr, flush=True)
+            continue
+
+        # ---- Read initial state + schema from disk SQLite ----
+        initial_by_table: dict = {}
+        schema_by_table:  dict = {}
         try:
             conn = sqlite3.connect(str(db_file))
             conn.row_factory = sqlite3.Row
@@ -65,47 +157,52 @@ def _sqlite_diff_save(task_id, appworld_root, apis_url, out_dbs_str):
             )]
             for tbl in tables:
                 try:
-                    rows = conn.execute(f"SELECT id FROM {tbl}").fetchall()
-                    initial_ids_by_table[tbl] = {row[0] for row in rows}
+                    rows = conn.execute(f"SELECT * FROM {tbl}").fetchall()
+                    initial_by_table[tbl] = {row["id"] for row in rows}
+                    schema_by_table[tbl]  = [
+                        r[1] for r in conn.execute(f"PRAGMA table_info({tbl})")
+                    ]
                 except Exception:
                     pass
             conn.close()
         except Exception as e_db:
-            print(f"[seed_task] sqldiff: cannot read {db_file}: {e_db}", file=sys.stderr)
+            skipped.append(f"{app_name}:db-read-error")
+            print(f"[seed_task] cannot read {db_file}: {e_db}", file=sys.stderr)
             continue
 
-        # Try to get current records via supervisor list endpoints
-        new_records = []
-        for tbl in initial_ids_by_table:
-            # Try common URL patterns
-            for url_pat in (
-                f"{apis_url}/supervisor/{app_name}/{tbl}",
-                f"{apis_url}/supervisor/{app_name}/{tbl}/list",
-                f"{apis_url}/{app_name}/supervisor/{tbl}",
-            ):
-                try:
-                    r = requests.get(url_pat, timeout=10)
-                    if r.status_code == 200:
-                        data    = r.json()
-                        records = data if isinstance(data, list) else data.get("data", [])
-                        init_ids = initial_ids_by_table[tbl]
-                        for rec in records:
-                            rid = rec.get("id")
-                            if rid is not None and rid not in init_ids:
-                                new_records.append(rec)
-                        break
-                except Exception:
-                    pass
+        # ---- Query current records and find new ones ----
+        new_by_table: dict = {}
+        for table, init_ids in initial_by_table.items():
+            current = _query_table(apis_url, app_name, table, token)
+            if current is None:
+                continue
+            new_recs = [r for r in current if r.get("id") not in init_ids]
+            if new_recs:
+                new_by_table[table] = new_recs
 
-        if new_records:
-            with open(out_file, "w") as f:
-                for rec in new_records:
-                    f.write(json.dumps(rec) + "\n")
-            written += len(new_records)
-            print(f"[seed_task] sqldiff: wrote {len(new_records)} records to {out_file.name}",
-                  file=sys.stderr, flush=True)
+        if not new_by_table:
+            continue
 
-    return written > 0, f"sqldiff ({written} new records)"
+        # ---- Write SQL INSERT format (same as world.close() produces) ----
+        out_file = out_dbs / f"{app_name}.jsonl"
+        with open(out_file, "w") as f:
+            for table, records in new_by_table.items():
+                cols = schema_by_table.get(table, [])
+                if not cols:
+                    continue
+                sql = (f"INSERT INTO {table} "
+                       f"({', '.join(cols)}) "
+                       f"VALUES ({', '.join(['?'] * len(cols))})")
+                for rec in records:
+                    vals = [rec.get(col) for col in cols]
+                    f.write(json.dumps([sql, vals]) + "\n")
+                    written += 1
+
+        n_new = sum(len(v) for v in new_by_table.items())
+        print(f"[seed_task] {app_name}: {len(new_by_table)} tables, "
+              f"{written} records written", file=sys.stderr, flush=True)
+
+    return written, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -127,26 +224,17 @@ try:
         load_ground_truth=False,
     )
 
-    # Collect all non-dunder attributes for debugging
     _all_attrs  = [a for a in dir(world) if not a.startswith("__")]
     _save_attrs = [a for a in _all_attrs
                    if any(k in a.lower()
                           for k in ("save","close","output","path","db","dump","export"))]
-    print(f"[seed_task] save_attrs: {_save_attrs}", file=sys.stderr, flush=True)
 
-    # Fetch supervisor OpenAPI — include paths in ready signal (stdout) so they show in logs
     _sv_paths = []
     try:
-        r = requests.get(f"{apis_url}/supervisor/openapi.json", timeout=5)
-        if r.status_code == 200:
-            _sv_paths = list(r.json().get("paths", {}).keys())
-    except Exception as e_spec:
-        print(f"[seed_task] supervisor spec error: {e_spec}", file=sys.stderr, flush=True)
-
-    # Also expose world.apis attribute names (one level deep)
-    _apis_attrs = []
-    try:
-        _apis_attrs = [a for a in dir(world.apis) if not a.startswith("_")]
+        _sv_paths = list(
+            requests.get(f"{apis_url}/supervisor/openapi.json", timeout=5)
+            .json().get("paths", {}).keys()
+        )
     except Exception:
         pass
 
@@ -156,7 +244,6 @@ try:
         "db_path":    world.output_db_home_path_in_memory,
         "save_attrs": _save_attrs,
         "sv_paths":   _sv_paths,
-        "apis_attrs": _apis_attrs,
     }), flush=True)
 
     # -----------------------------------------------------------------------
@@ -173,91 +260,53 @@ try:
                   / experiment_name / "tasks" / task_id / "dbs"
         out_dbs.mkdir(parents=True, exist_ok=True)
 
-        saved_ok    = False
-        save_method = "none"
-        save_error  = ""
+        rest_written = 0
+        rest_skipped = []
+        rest_error   = ""
 
-        # ---- Strategy 1: look for a native save method on world ----
-        for method_name in ("save_output_dbs", "dump_output_dbs",
-                            "export_output_dbs", "write_output_dbs"):
-            fn = getattr(world, method_name, None)
-            if fn is not None:
-                try:
-                    fn(str(out_dbs))
-                    saved_ok    = True
-                    save_method = method_name
-                    break
-                except Exception as e_m:
-                    save_error = f"{method_name}: {e_m}"
-                    print(f"[seed_task] {save_error}", file=sys.stderr, flush=True)
+        # ---- Step 1: REST diff (writes app-specific .jsonl files) ----
+        try:
+            rest_written, rest_skipped = _rest_diff_save(
+                task_id, appworld_root, apis_url, str(out_dbs)
+            )
+        except Exception as e_diff:
+            rest_error = str(e_diff)[:300]
+            print(f"[seed_task] rest_diff error: {e_diff}", file=sys.stderr, flush=True)
+            import traceback; traceback.print_exc(file=sys.stderr)
 
-        # ---- Strategy 2: supervisor REST export endpoint ----
-        if not saved_ok:
+        # ---- Step 2: world.close() — writes supervisor.jsonl + cleanup ----
+        close_error = ""
+        try:
+            _buf = io.StringIO(); _old = sys.stdout; sys.stdout = _buf
             try:
-                for sv_path in (
-                    f"/supervisor/export_task_output/{task_id}",
-                    f"/supervisor/tasks/{task_id}/export",
-                    f"/supervisor/save/{task_id}",
-                ):
-                    for method, kw in (
-                        ("post", {"json": {"output_dir": str(out_dbs),
-                                           "experiment_name": experiment_name}}),
-                        ("get",  {"params": {"output_dir": str(out_dbs),
-                                             "experiment_name": experiment_name}}),
-                    ):
-                        r = requests.request(method, f"{apis_url}{sv_path}", timeout=30, **kw)
-                        if r.status_code == 200:
-                            saved_ok    = True
-                            save_method = f"supervisor {method.upper()} {sv_path}"
-                            break
-                    if saved_ok:
-                        break
-            except Exception as e_sv:
-                save_error += f" | supervisor: {e_sv}"
-                print(f"[seed_task] supervisor export error: {e_sv}", file=sys.stderr, flush=True)
+                world.close()
+            finally:
+                sys.stdout = _old
+        except Exception as e_c:
+            close_error = str(e_c)[:200]
+            print(f"[seed_task] world.close() error: {e_c}", file=sys.stderr, flush=True)
 
-        # ---- Strategy 3: SQLite diff ----
-        if not saved_ok:
-            try:
-                saved_ok, save_method = _sqlite_diff_save(
-                    task_id, appworld_root, apis_url, str(out_dbs)
-                )
-            except Exception as e_diff:
-                save_error += f" | sqldiff: {e_diff}"
-                print(f"[seed_task] sqldiff error: {e_diff}", file=sys.stderr, flush=True)
-                import traceback; traceback.print_exc(file=sys.stderr)
-
-        # ---- Fallback: world.close() ----
-        if not saved_ok:
-            try:
-                _buf = io.StringIO(); _old = sys.stdout; sys.stdout = _buf
-                try:
-                    world.close()
-                finally:
-                    sys.stdout = _old
-                save_method = "world.close() [0-byte fallback]"
-                saved_ok    = True
-            except Exception as e_c:
-                save_error += f" | close: {e_c}"
-
-        # Report file sizes
+        # ---- Report ----
         saved_files = list(out_dbs.glob("*.jsonl"))
         sizes       = {f.name: f.stat().st_size for f in saved_files}
         venmo_bytes = sizes.get("venmo.jsonl", 0)
-        nonzero     = {k: v for k, v in sizes.items() if v > 0}
-        print(f"[seed_task] result '{save_method}': "
-              f"venmo={venmo_bytes}B nonzero={list(nonzero.keys())}",
+        nonzero     = [k for k, v in sizes.items() if v > 0]
+
+        print(f"[seed_task] save done: rest_written={rest_written} "
+              f"skipped={rest_skipped} venmo={venmo_bytes}B nonzero={nonzero}",
               file=sys.stderr, flush=True)
 
         print(json.dumps({
-            "saved":       saved_ok,
-            "method":      save_method,
-            "save_error":  save_error[:300] if save_error else "",
-            "venmo_bytes": venmo_bytes,
-            "nonzero":     len(nonzero),
+            "saved":        True,
+            "method":       f"rest_diff+close ({rest_written} new records)",
+            "rest_error":   rest_error,
+            "close_error":  close_error,
+            "skipped":      rest_skipped,
+            "venmo_bytes":  venmo_bytes,
+            "nonzero":      len(nonzero),
         }), flush=True)
 
-        break   # one save per subprocess lifetime
+        break
 
     os._exit(0)
 
