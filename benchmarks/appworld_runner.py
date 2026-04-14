@@ -227,7 +227,7 @@ def _evaluate_via_rest(task_id: str, final_state: Dict) -> float:
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
         if stderr:
-            print(f"  [eval] stderr: {stderr[:300]}", flush=True)
+            print(f"  [eval] stderr: {stderr[:3000]}", flush=True)
         if stdout:
             for line in reversed(stdout.splitlines()):
                 line = line.strip()
