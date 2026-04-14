@@ -93,6 +93,7 @@ try:
         except Exception as e:
             import traceback
             traceback.print_exc(file=sys.stderr)
+            srdb_error = str(e)
             # Fallback: try world.close() (works if world tracked the changes)
             try:
                 _buf = io.StringIO()
@@ -103,12 +104,17 @@ try:
                 finally:
                     sys.stdout = _old
                 print(json.dumps({
-                    "saved":  True,
-                    "method": "world.close() [fallback]",
-                    "exp":    experiment_name,
+                    "saved":       True,
+                    "method":      "world.close() [fallback]",
+                    "srdb_error":  srdb_error,
+                    "exp":         experiment_name,
                 }), flush=True)
             except Exception as e2:
-                print(json.dumps({"saved": False, "error": str(e), "error2": str(e2)}), flush=True)
+                print(json.dumps({
+                    "saved":      False,
+                    "srdb_error": srdb_error,
+                    "error":      str(e2),
+                }), flush=True)
 
         # After saving, exit so a fresh subprocess can seed the next task.
         break

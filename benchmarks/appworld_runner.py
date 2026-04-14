@@ -171,11 +171,15 @@ def _save_task(task_id: str, _appworld_root: str, _appworld_url: str,
         if line:
             data = _j.loads(line)
             if data.get("saved"):
+                srdb_err = data.get("srdb_error", "")
+                if srdb_err:
+                    print(f"  [save] srdb_error: {srdb_err[:200]}", flush=True)
                 print(f"  [save] OK via {data.get('method','?')} "
                       f"venmo={data.get('venmo_bytes','?')}B "
                       f"nonzero={data.get('nonzero','?')} files", flush=True)
                 return True
-            print(f"  [save] failed: {data.get('error','')[:100]}", flush=True)
+            print(f"  [save] failed srdb={data.get('srdb_error','')[:150]} "
+                  f"err={data.get('error','')[:100]}", flush=True)
         return False
     except Exception as e:
         print(f"  [save] error: {e}", flush=True)
