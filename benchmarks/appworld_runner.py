@@ -136,7 +136,8 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
             data = _json.loads(line)
             if data.get("success"):
                 _seed_processes[task.id] = proc
-                print(f"  [seed] ready: db={data.get('db_path','')}", flush=True)
+                print(f"  [seed] ready: db={data.get('db_path','')} "
+                      f"save_attrs={data.get('save_attrs',[])}", flush=True)
                 return True
             print(f"  [seed] failed: {data.get('error','')[:100]}", flush=True)
             proc.kill()
@@ -150,7 +151,7 @@ def _seed_task(task: Any, appworld_root: str, appworld_url: str) -> bool:
 
 
 def _save_task(task_id: str, _appworld_root: str, _appworld_url: str,
-               experiment_name: str = "ccp",
+               _experiment_name: str = "ccp",
                app_names: list = None) -> bool:
     """
     Save task state via the seed subprocess.
@@ -170,8 +171,9 @@ def _save_task(task_id: str, _appworld_root: str, _appworld_url: str,
         if line:
             data = _j.loads(line)
             if data.get("saved"):
-                print(f"  [save] OK via {data.get('method','world.close()')} "
-                      f"exp={data.get('exp', experiment_name)}", flush=True)
+                print(f"  [save] OK via {data.get('method','?')} "
+                      f"venmo={data.get('venmo_bytes','?')}B "
+                      f"nonzero={data.get('nonzero','?')} files", flush=True)
                 return True
             print(f"  [save] failed: {data.get('error','')[:100]}", flush=True)
         return False

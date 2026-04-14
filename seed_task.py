@@ -4,12 +4,13 @@ Seed + Save task using AppWorld Python library in the appworld venv.
 
 Protocol:
   Prints {"success": true, ...}  when ready
-  Reads "save" from stdin → calls world.close() → prints {"saved":true}
+  Reads "save" from stdin → calls save_remote_dbs() → prints {"saved":true}
   Reads EOF → exits
 
 Args: task_id appworld_root apis_url [experiment_name]
 """
 import sys, json, os, io
+from pathlib import Path
 
 task_id         = sys.argv[1]
 appworld_root   = sys.argv[2]
@@ -24,9 +25,6 @@ try:
 
     from appworld import AppWorld
 
-    # Pass experiment_name so world.close() saves to the correct folder.
-    # NOTE: do NOT access world.output_db_home_path — that attr may not exist
-    # in this version of AppWorld; close() computes the path internally.
     world = AppWorld(
         task_id=task_id,
         experiment_name=experiment_name,
@@ -34,10 +32,11 @@ try:
         load_ground_truth=False,
     )
 
-    # Expose available attrs for debugging (goes to runner log)
+    # Expose available attrs for debugging (goes to runner log via stderr)
     _all_attrs = [a for a in dir(world) if not a.startswith("__")]
     _save_attrs = [a for a in _all_attrs
                    if any(k in a.lower() for k in ("save","close","output","path","db"))]
+    print(f"[seed_task] save_attrs: {_save_attrs}", file=sys.stderr, flush=True)
 
     print(json.dumps({
         "success":    True,
@@ -55,28 +54,63 @@ try:
             continue
 
         try:
-            # Suppress any stdout AppWorld might emit during close()
-            _buf = io.StringIO()
-            _old = sys.stdout
-            sys.stdout = _buf
-            try:
-                world.close()
-            finally:
-                sys.stdout = _old
+            # The agent made changes via REST calls to the APIs server.
+            # save_remote_dbs diffs the CURRENT in-memory server state against
+            # the task's INITIAL on-disk DB → gives exactly what the agent changed,
+            # in the JSON model-record format that evaluate_task expects.
+            initial_dbs = str(Path(appworld_root) / "data" / "tasks" / task_id / "dbs")
+            out_dbs = str(
+                Path(appworld_root) / "experiments" / "outputs"
+                / experiment_name / "tasks" / task_id / "dbs"
+            )
+            Path(out_dbs).mkdir(parents=True, exist_ok=True)
+
+            print(f"[seed_task] saving: from={initial_dbs} to={out_dbs}", file=sys.stderr, flush=True)
+
+            world.save_remote_dbs(
+                out_dbs,
+                format="changes",
+                from_db_home_path=initial_dbs,
+            )
+
+            # Report sizes of saved files for diagnostics
+            saved_files = list(Path(out_dbs).glob("*.jsonl"))
+            sizes = {f.name: f.stat().st_size for f in saved_files}
+            venmo_bytes = sizes.get("venmo.jsonl", 0)
+            nonzero = {k: v for k, v in sizes.items() if v > 0}
+            print(f"[seed_task] saved {len(saved_files)} files, "
+                  f"nonzero={list(nonzero.keys())}, venmo={venmo_bytes}B",
+                  file=sys.stderr, flush=True)
 
             print(json.dumps({
-                "saved":  True,
-                "method": "world.close()",
-                "exp":    experiment_name,
+                "saved":       True,
+                "method":      "save_remote_dbs(changes,initial_dbs)",
+                "exp":         experiment_name,
+                "venmo_bytes": venmo_bytes,
+                "nonzero":     len(nonzero),
             }), flush=True)
 
         except Exception as e:
             import traceback
             traceback.print_exc(file=sys.stderr)
-            print(json.dumps({"saved": False, "error": str(e)}), flush=True)
+            # Fallback: try world.close() (works if world tracked the changes)
+            try:
+                _buf = io.StringIO()
+                _old = sys.stdout
+                sys.stdout = _buf
+                try:
+                    world.close()
+                finally:
+                    sys.stdout = _old
+                print(json.dumps({
+                    "saved":  True,
+                    "method": "world.close() [fallback]",
+                    "exp":    experiment_name,
+                }), flush=True)
+            except Exception as e2:
+                print(json.dumps({"saved": False, "error": str(e), "error2": str(e2)}), flush=True)
 
-        # After close() the server DB is reset; exit so a fresh subprocess
-        # can seed the next task cleanly.
+        # After saving, exit so a fresh subprocess can seed the next task.
         break
 
     os._exit(0)
