@@ -561,7 +561,10 @@ async def run_agent_with_tools(
                         content = json.dumps(raw_result)
                 except Exception as e:
                     content = f"Tool error: {e}"
-            print(f"  [exec] {name}({list(args.keys())}) → {content[:150]}", flush=True)
+            _args_str = ", ".join(
+                f"{k}={str(v)[:40]!r}" for k, v in args.items() if k != "access_token"
+            )
+            print(f"  [exec] {name}({_args_str}) → {content[:150]}", flush=True)
             # Extract any access tokens from result — store for any tool that returns a JWT
             import re as _rj
             jwt_matches = _rj.findall(r'eyJ[A-Za-z0-9_-]{10,}[.][A-Za-z0-9_-]{10,}[.][A-Za-z0-9_-]{10,}', content)

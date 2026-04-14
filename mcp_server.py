@@ -127,14 +127,19 @@ def _fetch_app_tools(app: str, base_url: str) -> List[Dict]:
                         properties[pname] = pschema
                     required.extend(body_req)
 
-            tools.append({
+            tool_entry = {
                 "name":        tool_name,
                 "description": f"[{app.upper()}] {description}",
                 "path":        path,
                 "http_method": http_method,
                 "properties":  properties,
                 "required":    list(set(required)),
-            })
+            }
+            tools.append(tool_entry)
+            # Debug: log parameter names for payment_request creation
+            if "payment_request" in tool_name and http_method == "post":
+                print(f"[MCP] {tool_name} params={list(properties.keys())} "
+                      f"required={tool_entry['required']}", file=sys.stderr)
 
     return tools
 
