@@ -150,12 +150,36 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
         f"  {t.name}: {t.description}" for t in tools
     )
 
+    # Find the actual supervisor message/completion tool dynamically.
+    # The POST endpoint at /message is the only write tool in supervisor.
+    # Try: contains "message", OR ends with _post (the only POST in supervisor).
+    _READ_SV = {"supervisor__index__get", "supervisor__show_active_task_active_task_get",
+                "supervisor__show_profile_profile_get"}
+    _sv_msg_tool = next(
+        (t.name for t in tools
+         if t.name.startswith("supervisor__")
+         and t.name not in _READ_SV
+         and (t.name.endswith("_post") or "message" in t.name.lower())),
+        None,
+    )
+    # Fallback: any non-GET supervisor tool
+    if _sv_msg_tool is None:
+        _sv_msg_tool = next(
+            (t.name for t in tools
+             if t.name.startswith("supervisor__")
+             and not t.name.endswith("_get")),
+            None,
+        )
+    print(f"  [agent] sv_msg_tool={_sv_msg_tool!r}", flush=True)
+
     # Group tools by app — show ALL names so agent can pick correct ones
     from collections import defaultdict
     app_tools = defaultdict(list)
     for t in tools:
         app = t.name.split("__")[0] if "__" in t.name else "other"
         app_tools[app].append(t.name)
+    # Show supervisor tools explicitly so agent knows exact names
+    _sv_tools = app_tools.get("supervisor", [])
 
     tool_summary_parts = []
     for app, tnames in sorted(app_tools.items()):
@@ -164,28 +188,45 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
 
     system_text = f"""You are an autonomous agent. Complete the task by calling tools in sequence.
 
-STRICT SEQUENCE:
+GENERAL SEQUENCE:
 1. Call supervisor__show_active_task_active_task_get → read the "instruction" field
-2. Call supervisor__show_account_passwords_account_passwords_get → get credentials
-3. Login: venmo__login_auth_token_post with {{"username": "<email_from_passwords>", "password": "<password>"}}
-   - Use the supervisor email (e.g. nicholas.weber@gmail.com) as username
-4. Find recipient's Venmo email using Venmo search:
-   venmo__search_users_users_get {{"query":"<recipient_name>"}}
-   Use the "email" field from the Venmo result as user_email
-   (Venmo emails differ from Gmail — always search Venmo directly)
-5. Execute with EXACT field names:
-   - REQUEST money FROM someone: venmo__create_payment_request_payment_requests_post → user_email=<recipient_email>
-   - SEND money TO someone: venmo__create_transaction_transactions_post → receiver_email=<recipient_email>
-6. REQUIRED: Call supervisor__create_message_message_post with {{"message": "<summary of what you did>"}}
+2. Call supervisor__show_account_passwords_account_passwords_get → get credentials for all apps
+3. Login to the relevant app(s) using the credentials from step 2:
+   - The account_passwords response is a list: [{{"account_name":"venmo","password":"abc"}},...]
+   - For each app you need, find its entry: account_name == "<app>" → use that password
+   - Each app has its OWN password — do NOT use another app's password
+   - Login: <app>__login_auth_token_post with {{"username": "<supervisor_email>", "password": "<that_app_password>"}}
+   - supervisor_email comes from supervisor__show_profile_profile_get (field "email")
+   - Store the returned access_token for use in subsequent calls to that app
+4. Look up any required contact/user information using the app's search tools
+   - For phone tasks: use phone__search_contacts_contacts_get to find contacts by name
+     The phone_number in contacts is the number to call/message
+     DO NOT try to create/register users — they already exist in the system
+   - For venmo tasks: use venmo__search_users_users_get to find user email
+5. Execute the required action with EXACT parameter names from the tool schema:
+   - Phone voice message: phone__send_voice_message_messages_voice__phone_number__post
+     → phone_number=<number>, message=<text>  (phone_number goes IN THE URL PATH)
+   - Phone SMS: phone__send_sms_message_messages_sms__phone_number__post
+     → phone_number=<number>, message=<text>
+   - Venmo request: venmo__create_payment_request_payment_requests_post
+     → user_email=<email>, amount=<float>, description=<text>
+   - Venmo send: venmo__create_transaction_transactions_post
+     → receiver_email=<email>, amount=<float>, description=<text>
+6. REQUIRED: Call {_sv_msg_tool or "supervisor__<message_tool>"} with {{"message": "<summary of what you did>"}}
    This records your answer for evaluation — skip this and the task FAILS.
+   All supervisor tools: {_sv_tools}
 7. Call finish ONLY after step 6 is done
 
 TOOL CALL: {{"action":"tool_call","tool":"<exact_tool_name>","input":{{<real_params>}}}}
 FINISH:    {{"action":"finish","answer":"<what you did>"}}
 
 RULES:
-- Use REAL credential values, never template placeholders
-- If login fails with 422, check the exact field names the tool expects
+- Use REAL credential values from step 2 — never template placeholders like <email>
+- CREDENTIAL RULE: account_passwords[i].account_name tells you which app; use account_passwords[i].password for that app only
+- If a tool returns 401/403 "not authorized", your access_token is missing — login to that app first
+- If login fails with 401, double-check you are using the correct app's password (not another app's)
+- If a tool returns 422, check the exact field names in the tool schema
+- For tasks involving multiple people (siblings, roommates, etc.): query each relationship type separately
 - Respond with a JSON OBJECT (not array), no prose
 
 Available tools:
@@ -389,11 +430,11 @@ Stored credentials (use these access_tokens directly — do NOT login again if t
                     "id":   f"call_{state['step']}_retry",
                     "type": "tool_call",
                 }]
-            elif not supervisor_message_called and action_tools_called:
+            elif not supervisor_message_called and action_tools_called and _sv_msg_tool:
                 # Agent completed action but forgot to call supervisor message — force it
                 print(f"  [agent] finish blocked — supervisor message not called; forcing it", flush=True)
                 tool_calls = [{
-                    "name": "supervisor__create_message_message_post",
+                    "name": _sv_msg_tool or "supervisor__create_message_message_post",
                     "args": {"message": answer},
                     "id":   f"call_{state['step']}_sv_msg",
                     "type": "tool_call",
@@ -525,6 +566,107 @@ async def build_shared_client(server_configs: Dict[str, Any]) -> tuple:
     return client, tools, interceptor
 
 
+def _coerce_tool_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Coerce string values before tool.ainvoke().
+
+    LLMs often quote integer IDs in their JSON output ("7830" instead of 7830).
+    The MCP client validates args against the Pydantic schema and rejects
+    string values for integer fields before the call even reaches the server.
+
+    Strategy: convert any string that looks like a pure integer UNLESS the
+    field name indicates it must stay a string (phone numbers, tokens, etc.).
+    """
+    # Field names (or suffixes) that must NOT be coerced to integers even if
+    # their value looks like a pure digit string.
+    _STRING_FIELDS = {
+        "phone_number", "email", "username", "password", "access_token",
+        "message", "description", "content", "query", "name", "title",
+        "text", "token", "url", "note", "zip_code", "postal_code",
+    }
+    _STRING_SUFFIXES = (
+        "_email", "_phone", "_password", "_token", "_url",
+        "_name", "_title", "_message", "_description", "_text",
+        "_phone_number", "_zip", "_code",
+    )
+
+    coerced = dict(args)
+    for k, v in list(coerced.items()):
+        if not isinstance(v, str):
+            continue
+        kl = k.lower()
+        if kl in _STRING_FIELDS:
+            continue
+        if any(kl.endswith(s) for s in _STRING_SUFFIXES):
+            continue
+        # Pure integer string → convert to int
+        if v.lstrip("-").isdigit() and v:
+            try:
+                coerced[k] = int(v)
+                print(f"  [coerce] {k}: str→int ({v}→{coerced[k]})", flush=True)
+            except (ValueError, TypeError):
+                pass
+        # Float string (e.g. "28.0") → convert to float
+        elif "." in v:
+            try:
+                coerced[k] = float(v)
+                print(f"  [coerce] {k}: str→float ({v}→{coerced[k]})", flush=True)
+            except (ValueError, TypeError):
+                pass
+    return coerced
+
+
+def _resolve_tool_with_embedded_id(
+    called_name: str,
+    args: Dict[str, Any],
+    tool_map: Dict[str, Any],
+) -> tuple:
+    """
+    Recover from the LLM embedding an ID value inside the tool name.
+
+    Example:
+      called_name = "amazon__show_product_products__435__get"
+      real tool   = "amazon__show_product_products__product_id__get"
+      → returns (real_tool, {**args, "product_id": 435})
+
+    Strategy: replace each numeric segment in the called name with a wildcard,
+    find a real tool that matches the wildcard pattern, then extract the
+    numeric segments as the values for the corresponding parameter placeholders.
+    """
+    import re as _re
+
+    parts = called_name.split("__")
+    # Find which segments are numeric
+    numeric_positions = [(i, p) for i, p in enumerate(parts) if _re.fullmatch(r"\d+", p)]
+    if not numeric_positions:
+        return None, args
+
+    # Find candidate tools from the same app
+    app = parts[0]
+    candidates = [t for t in tool_map if t.startswith(app + "__")]
+
+    for candidate in candidates:
+        cand_parts = candidate.split("__")
+        if len(cand_parts) != len(parts):
+            continue
+        # Check non-numeric positions match exactly
+        match = True
+        param_map: Dict[str, Any] = {}
+        for i, (called_seg, cand_seg) in enumerate(zip(parts, cand_parts)):
+            if i in dict(numeric_positions):
+                # Numeric position: candidate segment is the param name
+                param_map[cand_seg] = int(called_seg)
+            else:
+                if called_seg != cand_seg:
+                    match = False
+                    break
+        if match and param_map:
+            merged_args = {**args, **param_map}
+            return tool_map[candidate], merged_args
+
+    return None, args
+
+
 async def run_agent_with_tools(
     goal: str, tools: List[Any], max_steps: int,
 ) -> Dict[str, Any]:
@@ -555,13 +697,32 @@ async def run_agent_with_tools(
             app = name.split("__")[0]
             tool = tool_map.get(name)
             if tool is None:
-                content = f"Error: {name} is not a valid tool. Available: {list(tool_map.keys())[:10]}"
+                # Try to recover: agent may have embedded an ID value in the
+                # tool name (e.g. wish_list__402__post instead of
+                # wish_list__wish_list_id__post with wish_list_id=402).
+                tool, args = _resolve_tool_with_embedded_id(name, args, tool_map)
+                if tool is not None:
+                    print(f"  [coerce] resolved {name!r} → {tool.name!r} args={args}", flush=True)
+
+            if tool is None:
+                same_app = [k for k in tool_map if k.startswith(app + "__")]
+                content = (
+                    f"Error: {name!r} is not a valid tool name — "
+                    f"do NOT embed IDs in tool names; pass them as parameters instead. "
+                    f"Valid {app} tools: {same_app}"
+                )
             else:
                 try:
                     # Auto-inject stored access token if agent forgot it
                     stored_tokens = {**current_state.get("access_tokens", {}), **new_tokens}
                     if "access_token" not in args and app in stored_tokens:
                         args = {**args, "access_token": stored_tokens[app]}
+
+                    # Type coercion: LLM returns integers/booleans as strings.
+                    # Coerce before tool.ainvoke so the MCP client schema
+                    # validation passes (it validates against the Pydantic schema).
+                    args = _coerce_tool_args(args)
+
                     raw_result = await tool.ainvoke(args)
                     # Extract text from content block format: [{"type":"text","text":"..."}]
                     if isinstance(raw_result, list):
@@ -598,6 +759,10 @@ async def run_agent_with_tools(
         "max_steps": max_steps, "done": False, "final_answer": None, "access_tokens": {},
     }
 
+    # Retry guard: track (tool_name, error_fingerprint) → consecutive_count
+    _retry_counts: Dict[str, int] = {}
+    _MAX_SAME_ERROR = 3  # give up on a tool call after 3 identical failures
+
     for _ in range(max_steps):
         state = await _agent_node(state, tools)
         if state["done"]:
@@ -607,7 +772,31 @@ async def run_agent_with_tools(
         if new_tokens:
             merged = {**state.get("access_tokens", {}), **new_tokens}
             state = {**state, "access_tokens": merged}
+
+        # Check for repeated identical failures — break the loop early
         if tool_msgs:
+            last_msg = tool_msgs[-1]
+            msg_content = getattr(last_msg, "content", "")
+            last_ai = state["messages"][-1] if state["messages"] else None
+            last_tool = ""
+            if isinstance(last_ai, AIMessage):
+                tcs = getattr(last_ai, "tool_calls", None) or []
+                last_tool = tcs[-1].get("name", "") if tcs else ""
+            if last_tool and msg_content:
+                # Fingerprint = tool name + first 80 chars of error
+                _fp = f"{last_tool}::{msg_content[:80]}"
+                _retry_counts[_fp] = _retry_counts.get(_fp, 0) + 1
+                if _retry_counts[_fp] >= _MAX_SAME_ERROR:
+                    print(f"  [agent] giving up on {last_tool!r} after {_MAX_SAME_ERROR} identical failures", flush=True)
+                    # Inject a hint telling the agent to try a different approach
+                    from langchain_core.messages import ToolMessage
+                    hint = ToolMessage(
+                        content=(f"SYSTEM: Tool {last_tool!r} has failed {_MAX_SAME_ERROR} times "
+                                 f"with the same error. Stop calling it. "
+                                 f"Try a completely different approach or call finish if the task cannot be completed."),
+                        tool_call_id=f"retry_limit_{state['step']}",
+                    )
+                    tool_msgs = tool_msgs[:-1] + [hint]
             state = {**state, "messages": state["messages"] + tool_msgs}
         elif not state["done"]:
             # No tool calls and not done — stuck, break

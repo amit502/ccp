@@ -82,6 +82,7 @@ def _fetch_app_tools(app: str, base_url: str) -> List[Dict]:
             # Extract parameters from requestBody or parameters
             properties: Dict[str, Any] = {}
             required: List[str] = []
+            path_params: List[str] = []
 
             # Query/path params
             for param in operation.get("parameters", []):
@@ -90,6 +91,8 @@ def _fetch_app_tools(app: str, base_url: str) -> List[Dict]:
                 properties[pname] = pschema
                 if param.get("required", False):
                     required.append(pname)
+                if param.get("in") == "path":
+                    path_params.append(pname)
 
             # Request body
             body = operation.get("requestBody", {})
@@ -134,6 +137,7 @@ def _fetch_app_tools(app: str, base_url: str) -> List[Dict]:
                 "http_method": http_method,
                 "properties":  properties,
                 "required":    list(set(required)),
+                "path_params": path_params,
             }
             tools.append(tool_entry)
             # Debug: log parameter names for payment_request creation
@@ -215,18 +219,63 @@ class AppWorldMCPServer:
             app     = name.split("__")[0]
             path    = tool_def["path"]
             http_m  = tool_def["http_method"]
-            url     = f"{self.appworld_url}/{app}{path}"
 
             try:
                 fn = getattr(self._session, http_m)
                 _args = arguments
-                _url  = url
 
                 # Always send access_token as query param (AppWorld API convention)
                 _qp   = {}
                 _body = dict(_args)
                 if "access_token" in _body:
                     _qp["access_token"] = _body.pop("access_token")
+
+                # Substitute path parameters into the URL template
+                # e.g. /messages/voice/{phone_number} → /messages/voice/9654124977
+                _resolved_path = path
+                for pname in tool_def.get("path_params", []):
+                    if pname in _body:
+                        _resolved_path = _resolved_path.replace(
+                            "{" + pname + "}", str(_body.pop(pname))
+                        )
+                _url = f"{self.appworld_url}/{app}{_resolved_path}"
+
+                # Type coercion — LLM often returns integers/booleans as strings.
+                # Coerce based on the OpenAPI schema so downstream validation passes.
+                _props = tool_def.get("properties", {})
+                for _pname in list(_body.keys()):
+                    _pschema = _props.get(_pname, {})
+                    _ptype   = _pschema.get("type")
+                    _pval    = _body[_pname]
+                    if isinstance(_pval, str):
+                        if _ptype == "integer":
+                            try:
+                                _body[_pname] = int(_pval)
+                            except (ValueError, TypeError):
+                                pass
+                        elif _ptype == "number":
+                            try:
+                                _body[_pname] = float(_pval)
+                            except (ValueError, TypeError):
+                                pass
+                        elif _ptype == "boolean":
+                            _body[_pname] = _pval.lower() in ("true", "1", "yes")
+                        elif _ptype is None:
+                            # Schema type unknown — fall back to name-based heuristic
+                            _fl = _pname.lower()
+                            _INT_SFX = ("_id", "_count", "_year", "_month", "_day",
+                                        "_index", "_page", "_offset", "_size")
+                            if any(_fl.endswith(s) for s in _INT_SFX):
+                                try:
+                                    _body[_pname] = int(_pval)
+                                except (ValueError, TypeError):
+                                    pass
+                            elif _fl in ("amount", "price", "total", "balance",
+                                         "fee", "rate") or _fl.endswith("_amount"):
+                                try:
+                                    _body[_pname] = float(_pval)
+                                except (ValueError, TypeError):
+                                    pass
 
                 # AppWorld field-name normalisation:
                 # The venmo OpenAPI spec exposes "note"/"privacy" but the DB stores

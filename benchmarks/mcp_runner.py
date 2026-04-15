@@ -172,8 +172,9 @@ async def _run_all_tasks_async(
             return elem
         manager.add_observation = tracking_add
 
+        final_state  = {"step": 0}   # default if agent raises
         try:
-            final_state = await run_agent_with_tools(
+            final_state  = await run_agent_with_tools(
                 goal=task.goal,
                 tools=tools,
                 max_steps=max_steps,
@@ -197,11 +198,17 @@ async def _run_all_tasks_async(
         final_tokens = ctx.total_tokens()
         peak_tokens  = max(peak_tokens_seen[0], final_tokens)
 
+        # Use actual agent steps, not len(ctx.elements).
+        # FIFO/ACON drop old elements so len(ctx.elements) only reflects the
+        # surviving window (~4 items), not the 40 steps actually taken.
+        # Using the wrong denominator inflated CtxDep ~10x for these methods.
+        actual_steps = final_state.get("step", 0) or len(ctx.elements)
+
         result = TaskResult(
             task_id=task.id,
             goal=task.goal,
             success=success,
-            steps=len(ctx.elements),
+            steps=actual_steps,
             final_answer=final_answer,
             peak_tokens=peak_tokens,
             total_tokens=final_tokens,
