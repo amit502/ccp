@@ -61,8 +61,10 @@ def _compression_methods(token_threshold: int) -> List[tuple]:
     from ..baselines.acon import ACONContextManager
     from ..context_manager import CCPContextManager
 
-    TAU_HIGH = float(os.environ.get("TAU_HIGH", "0.6"))
-    TAU_LOW  = float(os.environ.get("TAU_LOW",  "0.3"))
+    TAU_HIGH        = float(os.environ.get("TAU_HIGH",        "0.6"))
+    TAU_LOW         = float(os.environ.get("TAU_LOW",         "0.3"))
+    _rr             = os.environ.get("RETENTION_RATIO", "")
+    RETENTION_RATIO = float(_rr) if _rr else None   # e.g. 0.65 → keep ≥65% of elements
 
     return [
         ("no_compression",   lambda t=token_threshold: NoCompression(token_threshold=t)),
@@ -70,9 +72,9 @@ def _compression_methods(token_threshold: int) -> List[tuple]:
         ("token_perplexity", lambda t=token_threshold: TokenPerplexityManager(token_threshold=t)),
         ("retrieval",        lambda t=token_threshold: RetrievalBasedManager(token_threshold=t)),
         ("acon",             lambda t=token_threshold: ACONContextManager(token_threshold=t)),
-        ("ccp",              lambda t=token_threshold, h=TAU_HIGH, l=TAU_LOW:
+        ("ccp",              lambda t=token_threshold, h=TAU_HIGH, l=TAU_LOW, r=RETENTION_RATIO:
                              CCPContextManager(tau_high=h, tau_low=l, token_threshold=t,
-                                              use_heuristics=True)),
+                                              use_heuristics=True, retention_ratio=r)),
     ]
 
 

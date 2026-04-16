@@ -30,9 +30,10 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
 
-APPWORLD_ROOT = os.environ.get("APPWORLD_ROOT", "")
-APPWORLD_URL  = os.environ.get("APPWORLD_URL", "http://localhost:8000")  # serve apis
-APPWORLD_ROOT_VENV = os.environ.get("APPWORLD_VENV", "/app/appworld-env")  # venv path
+APPWORLD_ROOT      = os.environ.get("APPWORLD_ROOT", "")
+APPWORLD_URL       = os.environ.get("APPWORLD_URL", "http://localhost:8000")  # serve apis
+APPWORLD_ROOT_VENV = os.environ.get("APPWORLD_VENV", "/app/appworld-env")      # venv path
+TASK_IDS_FILE      = os.environ.get("TASK_IDS_FILE", "")  # pin exact task list across runs
 
 
 # ---------------------------------------------------------------------------
@@ -71,17 +72,20 @@ def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[
     if not tasks_dir.exists():
         raise RuntimeError(f"AppWorld tasks directory not found: {tasks_dir}")
 
-    # Read task IDs from the dataset split file
-    if dataset_file.exists():
-        raw_ids = [l.strip() for l in dataset_file.read_text().splitlines() if l.strip()]
-        # Strip any tag suffixes (e.g. "task_001#tag" → "task_001")
+    # Pinned task list takes priority — ensures all methods run the same tasks
+    if TASK_IDS_FILE and Path(TASK_IDS_FILE).exists():
+        raw_ids  = [l.strip() for l in Path(TASK_IDS_FILE).read_text().splitlines() if l.strip()]
+        task_ids = [tid.split("#")[0] for tid in raw_ids]
+        print(f"[AppWorld] Using pinned task IDs from {TASK_IDS_FILE}: {len(task_ids)} tasks")
+    elif dataset_file.exists():
+        raw_ids  = [l.strip() for l in dataset_file.read_text().splitlines() if l.strip()]
         task_ids = [tid.split("#")[0] for tid in raw_ids]
     else:
-        # Fallback: list all task directories
         print(f"[AppWorld] Dataset file not found: {dataset_file} — listing all tasks")
         task_ids = [d.name for d in sorted(tasks_dir.iterdir()) if d.is_dir()]
 
     task_ids = task_ids[:max_tasks]
+    print(f"[AppWorld] Task IDs ({len(task_ids)}): {task_ids}")
 
     tasks = []
     for task_id in task_ids:
@@ -100,6 +104,13 @@ def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[
             continue
 
     print(f"[AppWorld] Loaded {len(tasks)} tasks from split='{split}'")
+
+    # On first run: persist the exact task IDs that loaded successfully so all
+    # subsequent runs (including separate per-method jobs) use the same set.
+    if TASK_IDS_FILE and not Path(TASK_IDS_FILE).exists() and tasks:
+        Path(TASK_IDS_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(TASK_IDS_FILE).write_text("\n".join(t.id for t in tasks))
+        print(f"[AppWorld] Saved {len(tasks)} task IDs → {TASK_IDS_FILE}")
     return tasks
 
 

@@ -17,7 +17,7 @@ Compression is triggered whenever total token count exceeds threshold T.
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .causal_scorer import score_context
 from .llm_client import call_llm
@@ -38,13 +38,18 @@ DEFAULT_TOKEN_THRESHOLD = 500   # T: trigger compression when context > T tokens
 # ---------------------------------------------------------------------------
 
 def assign_tiers(
-    elements: List[ContextElement],
-    tau_high: float = DEFAULT_TAU_HIGH,
-    tau_low:  float = DEFAULT_TAU_LOW,
+    elements:        List[ContextElement],
+    tau_high:        float          = DEFAULT_TAU_HIGH,
+    tau_low:         float          = DEFAULT_TAU_LOW,
+    retention_ratio: Optional[float] = None,
 ) -> Tuple[List[ContextElement], List[ContextElement], List[ContextElement]]:
     """
     Partition scored elements into (active, relevant, inert) lists.
     Elements without a ϕ score default to RELEVANT (conservative).
+
+    If retention_ratio is set (e.g. 0.65), elements are promoted from INERT
+    to RELEVANT (by φ score descending) until at least that fraction of all
+    elements are in ACTIVE or RELEVANT tier.
     """
     active, relevant, inert = [], [], []
 
@@ -60,6 +65,17 @@ def assign_tiers(
         else:
             e.tier = CompressionTier.INERT
             inert.append(e)
+
+    # Enforce minimum retention floor: promote lowest-φ INERT → RELEVANT
+    if retention_ratio is not None and elements:
+        target = int(len(elements) * retention_ratio)
+        shortfall = target - (len(active) + len(relevant))
+        if shortfall > 0:
+            inert.sort(key=lambda e: e.phi or 0.0, reverse=True)
+            for e in inert[:shortfall]:
+                e.tier = CompressionTier.RELEVANT
+                relevant.append(e)
+            inert = inert[shortfall:]
 
     return active, relevant, inert
 
@@ -114,17 +130,19 @@ class CCPContextManager:
 
     def __init__(
         self,
-        tau_high:         float = DEFAULT_TAU_HIGH,
-        tau_low:          float = DEFAULT_TAU_LOW,
-        token_threshold:  int   = DEFAULT_TOKEN_THRESHOLD,
-        use_heuristics:   bool  = True,
-        compress_relevant: bool = True,
+        tau_high:         float          = DEFAULT_TAU_HIGH,
+        tau_low:          float          = DEFAULT_TAU_LOW,
+        token_threshold:  int            = DEFAULT_TOKEN_THRESHOLD,
+        use_heuristics:   bool           = True,
+        compress_relevant: bool          = True,
+        retention_ratio:  Optional[float] = None,
     ):
         self.tau_high          = tau_high
         self.tau_low           = tau_low
         self.token_threshold   = token_threshold
         self.use_heuristics    = use_heuristics
         self.compress_relevant = compress_relevant
+        self.retention_ratio   = retention_ratio
 
         self._context: AgentContext = AgentContext(goal="")
         self._step: int = 0
@@ -204,6 +222,7 @@ class CCPContextManager:
             self._context.elements,
             tau_high=self.tau_high,
             tau_low=self.tau_low,
+            retention_ratio=self.retention_ratio,
         )
 
         # Step 3 & 4: Compress
