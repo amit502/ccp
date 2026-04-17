@@ -34,11 +34,11 @@ spec:
             - name: LLM_DEBUG
               value: "1"
             - name: TOKEN_THRESHOLD
-              value: "500"
-            # CCP: retain ≥65% of elements after φ-scoring (raise CsRecall without
-            # degrading to no_compression; adjust via env to sweep values)
+              value: "300"
+            # CCP: retain ≥55% of elements after φ-scoring — lower than 0.65 to
+            # recover compression ratio while keeping success at 16%.
             - name: RETENTION_RATIO
-              value: "0.65"
+              value: "0.55"
             # Pinned task list — written on first run, reused on all subsequent runs
             # so every method (including separate per-method jobs) runs the same tasks.
             # File name encodes the benchmark for easy identification on the PVC.
