@@ -102,7 +102,7 @@ def causal_recall(results: List[TaskResult], method: str = "") -> Optional[float
     """
     # Only CCP assigns φ scores; baselines have no causal scoring
     _method = method or (results[0].method if results else "")
-    if _method and _method != "ccp":
+    if _method and not _method.startswith("ccp"):
         return None
 
     preserved_counts = []

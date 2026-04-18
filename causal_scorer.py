@@ -28,10 +28,72 @@ from __future__ import annotations
 
 import json
 import re
-from typing import List, Optional
+from typing import Dict, FrozenSet, List, Optional, Set
 
 from .llm_client import call_llm
 from .models import AgentContext, CCPStats, CompressionTier, ContextElement
+
+
+# ---------------------------------------------------------------------------
+# ValueRegistry — deterministic causal scorer (CCP-v2, replaces LLM scorer)
+# ---------------------------------------------------------------------------
+
+class ValueRegistry:
+    """
+    Tracks values extracted from tool outputs and marks steps as causally
+    active when their output values appear in any later tool input.
+
+    Replaces the expensive LLM φ approximation with exact string matching:
+        φ(step) = 0.92  if any output value was used in a later input
+        φ(step) = 0.10  otherwise (unreferenced — safe to digest/drop)
+
+    Zero LLM calls. O(n·k) per input registration where k = values per step.
+    """
+
+    # Values to extract: numeric IDs, long tokens/keys, quoted identifiers
+    _PATTERNS: List[str] = [
+        r'\b(\d{3,12})\b',                    # numeric IDs (3-12 digits)
+        r'([a-zA-Z0-9_\-]{20,80})',            # tokens / API keys
+        r'"([a-zA-Z0-9_.@+\-]{5,60})"',        # quoted short identifiers
+    ]
+
+    # Common noise values that should never be treated as causal anchors
+    _STOP: FrozenSet[str] = frozenset({
+        "true", "false", "null", "none", "ok", "error", "success",
+        "failed", "pending", "200", "201", "400", "401", "403", "404", "500",
+    })
+
+    def __init__(self) -> None:
+        self._outputs:    Dict[int, FrozenSet[str]] = {}   # step → values
+        self._referenced: Set[int] = set()                 # steps marked active
+
+    # -- registration --------------------------------------------------------
+
+    def register_output(self, step: int, text: str) -> None:
+        """Extract candidate anchor values from a tool output."""
+        values: Set[str] = set()
+        for pat in self._PATTERNS:
+            values.update(re.findall(pat, text))
+        self._outputs[step] = frozenset(
+            v for v in values
+            if len(v) >= 3 and v.lower() not in self._STOP
+        )
+
+    def register_input(self, current_step: int, input_text: str) -> None:
+        """Scan a tool input and mark past steps whose values appear in it."""
+        for past_step, values in self._outputs.items():
+            if past_step >= current_step or past_step in self._referenced:
+                continue
+            if any(v in input_text for v in values):
+                self._referenced.add(past_step)
+
+    # -- scoring -------------------------------------------------------------
+
+    def phi(self, step: int) -> float:
+        return 0.92 if step in self._referenced else 0.10
+
+    def output_values(self, step: int) -> FrozenSet[str]:
+        return self._outputs.get(step, frozenset())
 
 # ---------------------------------------------------------------------------
 # MCP-aware heuristics (fast path — no LLM call needed)

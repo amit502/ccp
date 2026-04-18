@@ -54,17 +54,17 @@ _acon_module.GUIDELINES_PATH = RESULTS_DIR / "acon_guidelines"
 # ---------------------------------------------------------------------------
 
 def _compression_methods(token_threshold: int) -> List[tuple]:
-    """Return list of (method_name, factory) for all 6 methods."""
+    """Return list of (method_name, factory) for all methods."""
     from ..baselines.compression import (
         FIFOManager, NoCompression, RetrievalBasedManager, TokenPerplexityManager,
     )
     from ..baselines.acon import ACONContextManager
-    from ..context_manager import CCPContextManager
+    from ..context_manager import CCPContextManager, CCPv2ContextManager
 
     TAU_HIGH        = float(os.environ.get("TAU_HIGH",        "0.6"))
     TAU_LOW         = float(os.environ.get("TAU_LOW",         "0.3"))
     _rr             = os.environ.get("RETENTION_RATIO", "")
-    RETENTION_RATIO = float(_rr) if _rr else None   # e.g. 0.65 → keep ≥65% of elements
+    RETENTION_RATIO = float(_rr) if _rr else None
 
     return [
         ("no_compression",   lambda t=token_threshold: NoCompression(token_threshold=t)),
@@ -75,6 +75,7 @@ def _compression_methods(token_threshold: int) -> List[tuple]:
         ("ccp",              lambda t=token_threshold, h=TAU_HIGH, l=TAU_LOW, r=RETENTION_RATIO:
                              CCPContextManager(tau_high=h, tau_low=l, token_threshold=t,
                                               use_heuristics=True, retention_ratio=r)),
+        ("ccp_v2",           lambda t=token_threshold: CCPv2ContextManager(token_threshold=t)),
     ]
 
 
@@ -425,7 +426,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
 
 EXPERIMENT_CHOICES = [
     "all",
-    "appworld_all", "appworld_ccp", "appworld_fifo", "appworld_acon",
+    "appworld_all", "appworld_ccp", "appworld_ccp_v2", "appworld_fifo", "appworld_acon",
     "appworld_no_compression", "appworld_retrieval", "appworld_token_perplexity",
     "multiqa_all", "multiqa_ccp", "multiqa_fifo", "multiqa_acon",
     "multiqa_no_compression", "multiqa_retrieval", "multiqa_token_perplexity",

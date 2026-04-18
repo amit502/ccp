@@ -19,6 +19,8 @@ spec:
               value: /results/ccp
             - name: APPWORLD_ROOT
               value: /results/ccp/data/appworld
+            # appworld_all    = run all 7 methods (full benchmark table)
+            # appworld_ccp_v2 = run only ccp_v2
             - name: EXPERIMENT
               value: appworld_all
             - name: MAX_TASKS
@@ -34,11 +36,12 @@ spec:
             - name: LLM_DEBUG
               value: "1"
             - name: TOKEN_THRESHOLD
-              value: "300"
-            # CCP: retain ≥55% of elements after φ-scoring — lower than 0.65 to
-            # recover compression ratio while keeping success at 16%.
+              value: "500"
+            # CCP: retain ≥65% of elements after φ-scoring.
+            # threshold=500 + retention=0.65 gave CCP=16% (tied best) with CsRecall=0.65.
+            # Lower threshold compounded causal loss — do not go below 500.
             - name: RETENTION_RATIO
-              value: "0.55"
+              value: "0.65"
             # Pinned task list — written on first run, reused on all subsequent runs
             # so every method (including separate per-method jobs) runs the same tasks.
             # File name encodes the benchmark for easy identification on the PVC.
@@ -142,7 +145,7 @@ spec:
                   --benchmark appworld \
                   --tasks ${MAX_TASKS}
 
-              # ── 9. Run all 6 methods on AppWorld ────────────────────────
+              # ── 9. Run all methods on AppWorld ──────────────────────────
               echo "=== Running AppWorld: all 6 methods ==="
               RESULTS_PATH=${RESULTS_PATH} \
                 python3 -m ccp.experiments.run_experiment \
