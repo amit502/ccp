@@ -267,7 +267,7 @@ class CCPContextManager:
 # CCP-v2: Value-Reference Scoring + Output Compaction + Working Memory
 # ===========================================================================
 
-_RECENT_WINDOW = 3   # Last N steps always shown verbatim
+_RECENT_WINDOW = 2   # Last N steps kept (compacted if verbose)
 
 
 class WorkingMemory:
@@ -474,7 +474,10 @@ class CCPv2ContextManager:
 
             if e.step in recent_steps:
                 e.tier = CompressionTier.ACTIVE
-                active.append(e)          # Always keep recent steps verbatim
+                # Compact verbose recent outputs to cut token bloat
+                if len(e.tool_output) > 300 and e.compressed_output is None:
+                    e.compressed_output = self._compact_output(e)
+                active.append(e)
             elif phi >= 0.7:
                 e.tier = CompressionTier.ACTIVE
                 if e.compressed_output is None:
