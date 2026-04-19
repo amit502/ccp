@@ -20,13 +20,20 @@ spec:
             - name: EXPERIMENT
               value: multiqa_all
             - name: MAX_TASKS
-              value: "50"
+              value: "25"
             - name: MAX_STEPS
               value: "20"
+            # NQ data persisted on PVC — downloaded once, reused across runs
             - name: MULTIQA_DATA_FILE
               value: /results/ccp/data/nq-dev-00.jsonl.gz
             - name: PYTHONPATH
               value: /app
+            - name: LLM_DEBUG
+              value: "1"
+            - name: TOKEN_THRESHOLD
+              value: "500"
+            - name: RETENTION_RATIO
+              value: "0.65"
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -44,7 +51,7 @@ spec:
               # ── 1. System dependencies ──────────────────────────────────
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
-              apt-get install -y -qq python3 python3-pip git wget
+              apt-get install -y -qq python3 python3-pip git wget curl
 
               # ── 2. Clone and install CCP ────────────────────────────────
               git clone https://github.com/amit502/ccp.git ${REPO_PATH}
@@ -52,21 +59,33 @@ spec:
               pip3 install -r requirements.txt -q
               pip3 install -e . --no-deps -q
 
-              # ── 3. Create results directory ─────────────────────────────
+              # ── 3. Create results directories ───────────────────────────
               mkdir -p ${RESULTS_PATH}/data
+              mkdir -p ${RESULTS_PATH}/acon_guidelines
 
-              # ── 4. Download Natural Questions data ──────────────────────
-              if [ ! -f ${MULTIQA_DATA_FILE} ]; then
+              # ── 4. Download Natural Questions data (skip if on PVC) ─────
+              if [ ! -f "${MULTIQA_DATA_FILE}" ]; then
                 echo "Downloading Natural Questions dev set..."
                 wget -q -O ${MULTIQA_DATA_FILE} \
                   https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
-                echo "NQ data downloaded."
+                echo "NQ data downloaded: $(du -h ${MULTIQA_DATA_FILE} | cut -f1)"
               else
-                echo "NQ data already exists, skipping."
+                echo "NQ data found at ${MULTIQA_DATA_FILE} — skipping download."
               fi
 
-              # ── 5. Run all 6 methods on Multi-QA ────────────────────────
-              echo "=== Running Multi-QA: all 6 methods ==="
+              # Run experiments from /app so ccp is a proper package
+              cd /app
+
+              # ── 5. Run ACON offline optimization ────────────────────────
+              echo "=== ACON Offline Optimization ==="
+              RESULTS_PATH=${RESULTS_PATH} \
+                python3 -m ccp.experiments.run_experiment \
+                  --experiment acon_optimize \
+                  --benchmark multiqa \
+                  --tasks ${MAX_TASKS}
+
+              # ── 6. Run all 7 methods on Multi-QA ────────────────────────
+              echo "=== Running Multi-QA: all 7 methods ==="
               RESULTS_PATH=${RESULTS_PATH} \
                 python3 -m ccp.experiments.run_experiment \
                   --experiment ${EXPERIMENT} \

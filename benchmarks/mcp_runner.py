@@ -76,7 +76,8 @@ async def _run_one_task(
     """Run one task. Uses cached_tools/interceptor if provided, else builds new client."""
     from ..mcp_agent import build_mcp_agent, run_agent_with_tools
 
-    t0 = time.time()
+    t0           = time.time()
+    final_state  = {"step": 0}
 
     try:
         if cached_tools is not None and interceptor is not None:
@@ -102,10 +103,11 @@ async def _run_one_task(
         success      = False
         final_answer = None
 
-    ctx = manager.get_compressed_context()
+    ctx          = manager.get_compressed_context()
+    actual_steps = final_state.get("step", 0) or len(ctx.elements)
     return TaskResult(
         task_id=task_id, goal=goal, success=success,
-        steps=len(ctx.elements), final_answer=final_answer,
+        steps=actual_steps, final_answer=final_answer,
         peak_tokens=ctx.total_tokens(), total_tokens=ctx.total_tokens(),
         time_elapsed=time.time() - t0, ccp_stats=manager.get_stats_log(), method="",
     )

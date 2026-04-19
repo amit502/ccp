@@ -370,6 +370,10 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
     Run ACON offline optimization on the TRAIN split.
     Saves guidelines to RESULTS_PATH/acon_guidelines/<benchmark>.json.
     Main evaluation uses TEST split — correct separation.
+
+    OfficeBench is skipped: its MCP server is task-specific (requires task_id + app
+    per call) and is incompatible with the task-agnostic server_configs assumption
+    in the optimizer's task_runner. ACON will run on OfficeBench without guidelines.
     """
     import asyncio
     from ..baselines.acon import (
@@ -377,8 +381,18 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
     )
     from ..benchmarks.mcp_runner import _run_one_task
 
-    # Use TRAIN split — keeps test split unseen during optimization
-    train_runner = _make_appworld_runner(max_tasks=max_tasks, max_steps=30, split="train")
+    if benchmark == "officebench":
+        print("[ACON] Skipping optimization for OfficeBench — task-specific server "
+              "configs are incompatible with the offline optimizer.")
+        return
+
+    # Select the correct train runner for the benchmark
+    if benchmark == "multiqa":
+        train_runner = _make_multiqa_runner(max_tasks=max_tasks, max_steps=20)
+    else:
+        # AppWorld: use TRAIN split so test tasks remain unseen during optimization
+        train_runner = _make_appworld_runner(max_tasks=max_tasks, max_steps=30, split="train")
+
     if train_runner is None:
         return
 
