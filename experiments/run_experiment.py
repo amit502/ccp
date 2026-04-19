@@ -75,7 +75,9 @@ def _compression_methods(token_threshold: int) -> List[tuple]:
         ("ccp",              lambda t=token_threshold, h=TAU_HIGH, l=TAU_LOW, r=RETENTION_RATIO:
                              CCPContextManager(tau_high=h, tau_low=l, token_threshold=t,
                                               use_heuristics=True, retention_ratio=r)),
-        ("ccp_v2",           lambda t=token_threshold: CCPv2ContextManager(token_threshold=t)),
+        ("ccp_v2",           lambda t=token_threshold, h=TAU_HIGH, l=TAU_LOW, r=RETENTION_RATIO:
+                             CCPv2ContextManager(tau_high=h, tau_low=l, token_threshold=t,
+                                                 compress_relevant=True, retention_ratio=r)),
     ]
 
 

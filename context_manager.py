@@ -264,10 +264,8 @@ class CCPContextManager:
 
 
 # ===========================================================================
-# CCP-v2: Value-Reference Scoring + Output Compaction + Working Memory
+# CCP-v2: Value-Reference Scoring + LLM Summaries + Working Memory
 # ===========================================================================
-
-_RECENT_WINDOW = 2   # Last N steps kept (compacted if verbose)
 
 
 class WorkingMemory:
@@ -278,22 +276,19 @@ class WorkingMemory:
     """
 
     def __init__(self) -> None:
-        self.access_tokens: Dict[str, str]  = {}   # app → token
-        self.known_ids:     Dict[str, Any]  = {}   # label → value
-        self._n_steps:      int             = 0
+        self.access_tokens: Dict[str, str] = {}
+        self.known_ids:     Dict[str, Any] = {}
+        self._n_steps:      int            = 0
 
     def update(self, tool_name: str, tool_input: Dict, tool_output: str) -> None:
         self._n_steps += 1
         app = tool_name.split("__")[0] if "__" in tool_name else tool_name
-
         try:
             data = json.loads(tool_output)
             if isinstance(data, dict):
-                # Access tokens
                 for k in ("access_token", "token", "api_key", "auth_token"):
                     if k in data and isinstance(data[k], str) and data[k]:
                         self.access_tokens[app] = data[k]
-                # IDs — any field named "id" or ending with "_id"
                 for k, v in data.items():
                     if v is None:
                         continue
@@ -302,7 +297,6 @@ class WorkingMemory:
                     elif k.endswith("_id"):
                         self.known_ids[k] = v
         except (json.JSONDecodeError, TypeError):
-            # Raw output may itself be a token (short, no spaces)
             stripped = tool_output.strip().strip('"')
             if 10 <= len(stripped) <= 100 and " " not in stripped:
                 if any(kw in tool_name for kw in ("auth", "token", "login", "credential")):
@@ -323,42 +317,51 @@ class WorkingMemory:
 
 class CCPv2ContextManager:
     """
-    CCP v2 — final production method combining three improvements:
+    CCP v2 — three targeted improvements over CCP v1:
 
     1. Value-Reference Scoring  (replaces LLM φ scorer)
-       An element is causally active when any value from its output appears
-       in a later tool input. Exact, deterministic, zero LLM overhead.
+       φ = 0.92 when any output value appears in a later tool input — exact,
+       deterministic, zero LLM overhead.  φ = 0.10 otherwise.
+       retention_ratio floor then promotes unreferenced elements to RELEVANT
+       so at least that fraction receives an LLM summary.
 
-    2. Output Compaction  (new — v1 kept ACTIVE elements verbatim)
-       Even referenced elements have verbose outputs replaced by just the
-       key-values actually extracted. Cuts peak tokens ~3-5×.
+    2. LLM Summaries  (same as CCP v1 for RELEVANT tier)
+       Unreferenced-but-retained elements get the same dense LLM summary as
+       original CCP, preserving narrative state the agent needs.
 
-    3. Working Memory  (new)
-       A structured {access_tokens, known_ids} dict is always prepended to
-       the agent context. Critical values survive aggressive compression.
+    3. Working Memory
+       A structured {access_tokens, known_ids} dict is always prepended.
+       Critical credentials and IDs survive even the most aggressive compression.
 
     Context layout after compression:
         [WORKING MEMORY]
-        [Last RECENT_WINDOW steps — verbatim]
-        [Referenced earlier steps — compacted output]
-        [Unreferenced steps — single-line digest]
+        [ACTIVE  — directly referenced steps, verbatim]
+        [RELEVANT — retention-floor steps, LLM summary]
+        [INERT   — remaining steps, one-line digest]
     """
 
     def __init__(
         self,
-        token_threshold: int = DEFAULT_TOKEN_THRESHOLD,
-        recent_window:   int = _RECENT_WINDOW,
+        tau_high:          float          = DEFAULT_TAU_HIGH,
+        tau_low:           float          = DEFAULT_TAU_LOW,
+        token_threshold:   int            = DEFAULT_TOKEN_THRESHOLD,
+        compress_relevant: bool           = True,
+        retention_ratio:   Optional[float] = None,
     ) -> None:
-        self.token_threshold = token_threshold
-        self.recent_window   = recent_window
-        self._context        = AgentContext(goal="")
-        self._step           = 0
-        self._stats_log:     List[CCPStats] = []
-        self._registry       = ValueRegistry()
-        self._memory         = WorkingMemory()
+        self.tau_high          = tau_high
+        self.tau_low           = tau_low
+        self.token_threshold   = token_threshold
+        self.compress_relevant = compress_relevant
+        self.retention_ratio   = retention_ratio
+
+        self._context   = AgentContext(goal="")
+        self._step      = 0
+        self._stats_log: List[CCPStats] = []
+        self._registry  = ValueRegistry()
+        self._memory    = WorkingMemory()
 
     # ------------------------------------------------------------------ #
-    # Public interface  (identical to CCPContextManager)                  #
+    # Public interface  (same as CCPContextManager)                       #
     # ------------------------------------------------------------------ #
 
     def set_goal(self, goal: str) -> None:
@@ -372,12 +375,8 @@ class CCPv2ContextManager:
         status:      str = "ok",
     ) -> ContextElement:
         self._step += 1
-
-        # 1. Mark past outputs referenced by this input (exact causal detection)
         self._registry.register_input(self._step, str(tool_input))
-        # 2. Extract anchor values from this output for future reference matching
         self._registry.register_output(self._step, tool_output)
-        # 3. Update structured working memory (tokens / IDs always kept)
         self._memory.update(tool_name, tool_input, tool_output)
 
         element = ContextElement(
@@ -410,92 +409,49 @@ class CCPv2ContextManager:
     # Internal compression pipeline                                        #
     # ------------------------------------------------------------------ #
 
-    def _compact_output(self, element: ContextElement) -> str:
-        """Reduce a referenced element's output to just its anchor key-values."""
-        values = self._registry.output_values(element.step)
-        output = element.tool_output
-
-        try:
-            data = json.loads(output)
-            if isinstance(data, dict):
-                compact: Dict[str, Any] = {}
-                for k, v in data.items():
-                    if (str(v) in values
-                            or k in ("id", "status", "access_token", "token")
-                            or k.endswith("_id")
-                            or k.endswith("_token")):
-                        compact[k] = v
-                if compact:
-                    return json.dumps(compact)
-            elif isinstance(data, list) and data:
-                # Keep only items that contain at least one referenced value
-                hits = [it for it in data if any(str(v) in str(it) for v in values)]
-                shown = (hits or data)[:3]
-                suffix = f" …({len(data)} total)" if len(data) > 3 else ""
-                return json.dumps(shown) + suffix
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-        return output[:250] + ("…" if len(output) > 250 else "")
-
-    def _digest(self, element: ContextElement) -> str:
-        truncated = element.tool_output[:60].replace("\n", " ")
-        suffix = "…" if len(element.tool_output) > 60 else ""
-        return f"[{element.tool_name}] → {truncated}{suffix}"
-
     def _make_wm_element(self) -> ContextElement:
         wm_text = self._memory.to_block()
         e = ContextElement(
-            step=0,
-            tool_name="__working_memory__",
-            tool_input={},
-            tool_output=wm_text,
-            status="ok",
+            step=0, tool_name="__working_memory__",
+            tool_input={}, tool_output=wm_text, status="ok",
         )
         e.compressed_output = wm_text
         return e
 
     def _run_compression(self) -> None:
-        # Exclude the working-memory sentinel (step=0)
         elements = [e for e in self._context.elements if e.step > 0]
         n_before = len(elements)
         if not elements:
             return
 
         tokens_before = self._context.total_tokens()
-        recent_steps  = {e.step for e in elements[-self.recent_window:]}
 
-        active: List[ContextElement] = []
-        inert:  List[ContextElement] = []
-
+        # Score using ValueRegistry — deterministic, zero LLM scorer calls
         for e in elements:
-            phi  = self._registry.phi(e.step)
-            e.phi = phi
+            e.phi = self._registry.phi(e.step)
 
-            if e.step in recent_steps:
-                e.tier = CompressionTier.ACTIVE
-                # Compact verbose recent outputs to cut token bloat
-                if len(e.tool_output) > 300 and e.compressed_output is None:
-                    e.compressed_output = self._compact_output(e)
-                active.append(e)
-            elif phi >= 0.7:
-                e.tier = CompressionTier.ACTIVE
+        # Partition into tiers; retention_ratio floor promotes unreferenced
+        # elements from INERT → RELEVANT so they receive LLM summaries
+        active, relevant, inert = assign_tiers(
+            elements,
+            tau_high=self.tau_high,
+            tau_low=self.tau_low,
+            retention_ratio=self.retention_ratio,
+        )
+
+        # RELEVANT → LLM summary (same quality as original CCP)
+        if self.compress_relevant:
+            for e in relevant:
                 if e.compressed_output is None:
-                    e.compressed_output = self._compact_output(e)
-                active.append(e)
-            else:
-                e.tier = CompressionTier.INERT
-                if e.compressed_output is None:
-                    e.compressed_output = self._digest(e)
-                inert.append(e)
+                    e.compressed_output = _compress_to_summary(e)
 
-        # Rebuild context: working memory first, then active, then digests
-        self._context.elements = [self._make_wm_element()] + active + inert
+        # INERT → one-line digest
+        for e in inert:
+            if e.compressed_output is None:
+                e.compressed_output = _compress_to_digest(e)
 
-        # Hard-trim oldest inert digests to stay within token budget
-        while inert and self._context.total_tokens() > self.token_threshold:
-            inert.pop(0)
-            self._context.elements = [self._make_wm_element()] + active + inert
+        # Working memory prepended — always survives
+        self._context.elements = [self._make_wm_element()] + active + relevant + inert
 
         tokens_after = self._context.total_tokens()
         delta        = (1 - tokens_after / max(tokens_before, 1)) * 100
@@ -503,7 +459,7 @@ class CCPv2ContextManager:
 
         print(
             f"[CCP-v2] Step {self._step}: {n_before} elements → "
-            f"active={len(active)}, inert={len(inert)} | "
+            f"active={len(active)}, relevant={len(relevant)}, inert={len(inert)} | "
             f"tokens {tokens_before}→{tokens_after} ({direction})"
         )
 
@@ -511,7 +467,7 @@ class CCPv2ContextManager:
             step=self._step,
             total_elements=n_before,
             active_count=len(active),
-            relevant_count=0,
+            relevant_count=len(relevant),
             inert_count=len(inert),
             tokens_before=tokens_before,
             tokens_after=tokens_after,
