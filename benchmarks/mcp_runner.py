@@ -176,13 +176,20 @@ async def _run_all_tasks_async(
 
         final_state  = {"step": 0}   # default if agent raises
         try:
-            final_state  = await run_agent_with_tools(
-                goal=task.goal,
-                tools=tools,
-                max_steps=max_steps,
+            final_state  = await asyncio.wait_for(
+                run_agent_with_tools(
+                    goal=task.goal,
+                    tools=tools,
+                    max_steps=max_steps,
+                ),
+                timeout=900.0,  # 15 min per task — prevents hung API calls blocking the job
             )
             success      = score_fn(task.id, final_state) >= 1.0
             final_answer = final_state.get("final_answer")
+        except asyncio.TimeoutError:
+            print(f"  [MCP] Task {task.id} timed out after 900s — marking failed", flush=True)
+            success      = False
+            final_answer = None
         except Exception as exc:
             import traceback
             print(f"  [MCP] Task {task.id} error: {type(exc).__name__}: {exc}")

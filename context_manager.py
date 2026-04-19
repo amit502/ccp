@@ -492,6 +492,11 @@ class CCPv2ContextManager:
         # Rebuild context: working memory first, then active, then digests
         self._context.elements = [self._make_wm_element()] + active + inert
 
+        # Hard-trim oldest inert digests to stay within token budget
+        while inert and self._context.total_tokens() > self.token_threshold:
+            inert.pop(0)
+            self._context.elements = [self._make_wm_element()] + active + inert
+
         tokens_after = self._context.total_tokens()
         delta        = (1 - tokens_after / max(tokens_before, 1)) * 100
         direction    = f"-{delta:.1f}%" if delta > 0.05 else f"+{abs(delta):.1f}%"
