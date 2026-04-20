@@ -59,7 +59,7 @@ def _compression_methods(token_threshold: int) -> List[tuple]:
         FIFOManager, NoCompression, RetrievalBasedManager, TokenPerplexityManager,
     )
     from ..baselines.acon import ACONContextManager
-    from ..context_manager import CCPContextManager, CCPv2ContextManager
+    from ..context_manager import CCPContextManager
 
     TAU_HIGH        = float(os.environ.get("TAU_HIGH",        "0.6"))
     TAU_LOW         = float(os.environ.get("TAU_LOW",         "0.3"))
@@ -75,9 +75,6 @@ def _compression_methods(token_threshold: int) -> List[tuple]:
         ("ccp",              lambda t=token_threshold, h=TAU_HIGH, l=TAU_LOW, r=RETENTION_RATIO:
                              CCPContextManager(tau_high=h, tau_low=l, token_threshold=t,
                                               use_heuristics=True, retention_ratio=r)),
-        ("ccp_v2",           lambda t=token_threshold, h=TAU_HIGH, l=TAU_LOW, r=RETENTION_RATIO:
-                             CCPv2ContextManager(tau_high=h, tau_low=l, token_threshold=t,
-                                                 compress_relevant=True, retention_ratio=r)),
     ]
 
 
@@ -175,10 +172,12 @@ def run_benchmark(
             all_metrics.append(metrics)
         except Exception as e:
             print(f"  [ERROR] {bench_name}/{method_name}: {e}")
+        # Save after every method — partial results survive if job is killed
+        if all_metrics:
+            save_results(all_metrics, filename)
 
     if all_metrics:
         print_table(all_metrics)
-        save_results(all_metrics, filename)
     return all_metrics
 
 
@@ -442,7 +441,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
 
 EXPERIMENT_CHOICES = [
     "all",
-    "appworld_all", "appworld_ccp", "appworld_ccp_v2", "appworld_fifo", "appworld_acon",
+    "appworld_all", "appworld_ccp", "appworld_fifo", "appworld_acon",
     "appworld_no_compression", "appworld_retrieval", "appworld_token_perplexity",
     "multiqa_all", "multiqa_ccp", "multiqa_fifo", "multiqa_acon",
     "multiqa_no_compression", "multiqa_retrieval", "multiqa_token_perplexity",

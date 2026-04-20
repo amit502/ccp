@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from .causal_scorer import score_context, ValueRegistry
+from .causal_scorer import ValueRegistry
 from .llm_client import call_llm
 from .models import AgentContext, CCPStats, CompressionTier, ContextElement
 
@@ -119,155 +119,6 @@ def _compress_to_digest(element: ContextElement) -> str:
 # Main CCP compression trigger
 # ---------------------------------------------------------------------------
 
-class CCPContextManager:
-    """
-    Sits between the MCP tool layer and the agent's context window.
-
-    Usage (in a LangGraph node):
-        manager = CCPContextManager()
-        manager.add_observation(tool_name, tool_input, tool_output, status, goal)
-        compressed_context = manager.get_compressed_context()
-    """
-
-    def __init__(
-        self,
-        tau_high:         float          = DEFAULT_TAU_HIGH,
-        tau_low:          float          = DEFAULT_TAU_LOW,
-        token_threshold:  int            = DEFAULT_TOKEN_THRESHOLD,
-        use_heuristics:   bool           = True,
-        compress_relevant: bool          = True,
-        retention_ratio:  Optional[float] = None,
-    ):
-        self.tau_high          = tau_high
-        self.tau_low           = tau_low
-        self.token_threshold   = token_threshold
-        self.use_heuristics    = use_heuristics
-        self.compress_relevant = compress_relevant
-        self.retention_ratio   = retention_ratio
-
-        self._context: AgentContext = AgentContext(goal="")
-        self._step: int = 0
-        self._stats_log: List[CCPStats] = []
-
-    # ------------------------------------------------------------------ #
-    # Public interface                                                     #
-    # ------------------------------------------------------------------ #
-
-    def set_goal(self, goal: str) -> None:
-        self._context.goal = goal
-
-    def add_observation(
-        self,
-        tool_name:   str,
-        tool_input:  dict,
-        tool_output: str,
-        status:      str = "ok",
-    ) -> ContextElement:
-        """
-        Called after every MCP tool response.
-        Adds the new (action, observation) pair to the context.
-        Triggers compression if the token threshold is exceeded.
-        """
-        self._step += 1
-        element = ContextElement(
-            step=self._step,
-            tool_name=tool_name,
-            tool_input=tool_input,
-            tool_output=tool_output,
-            status=status,
-        )
-        self._context.add(element)
-
-        # Trigger CCP if context is getting large
-        if self._context.total_tokens() > self.token_threshold:
-            self._run_compression()
-
-        return element
-
-    def get_compressed_context(self) -> AgentContext:
-        """Return the current (possibly compressed) context."""
-        return self._context
-
-    def get_stats_log(self) -> List[CCPStats]:
-        return self._stats_log
-
-    def reset(self, goal: str = "") -> None:
-        """Start a new task trajectory."""
-        self._context = AgentContext(goal=goal)
-        self._step = 0
-
-    # ------------------------------------------------------------------ #
-    # Internal compression pipeline                                        #
-    # ------------------------------------------------------------------ #
-
-    def _run_compression(self) -> None:
-        """
-        Execute the full CCP compression pipeline:
-          1. Score all unscored elements (heuristics → LLM scorer)
-          2. Assign tiers (active / relevant / inert)
-          3. Compress relevant elements to summaries
-          4. Replace inert elements with one-line digests
-          5. Record stats
-        """
-        tokens_before = self._context.total_tokens()
-        n_before = len(self._context.elements)
-
-        # Step 1: Score
-        _, scorer_calls = score_context(
-            self._context,
-            use_heuristics=self.use_heuristics,
-        )
-
-        # Step 2: Assign tiers
-        active, relevant, inert = assign_tiers(
-            self._context.elements,
-            tau_high=self.tau_high,
-            tau_low=self.tau_low,
-            retention_ratio=self.retention_ratio,
-        )
-
-        # Step 3 & 4: Compress
-        if self.compress_relevant:
-            for e in relevant:
-                if e.compressed_output is None:  # Don't re-compress
-                    e.compressed_output = _compress_to_summary(e)
-
-        for e in inert:
-            if e.compressed_output is None:
-                e.compressed_output = _compress_to_digest(e)
-
-        # Step 5: Stats
-        tokens_after = self._context.total_tokens()
-        self._stats_log.append(CCPStats(
-            step=self._step,
-            total_elements=n_before,
-            active_count=len(active),
-            relevant_count=len(relevant),
-            inert_count=len(inert),
-            tokens_before=tokens_before,
-            tokens_after=tokens_after,
-            scorer_calls=scorer_calls,
-        ))
-
-        delta_pct = (1 - tokens_after / max(tokens_before, 1)) * 100
-        if delta_pct > 0.05:
-            direction = f"-{delta_pct:.1f}% reduction"
-        elif delta_pct < -0.05:
-            direction = f"+{abs(delta_pct):.1f}% growth"
-        else:
-            direction = "no change"
-        print(
-            f"[CCP] Step {self._step}: {n_before} elements → "
-            f"active={len(active)}, relevant={len(relevant)}, inert={len(inert)} | "
-            f"tokens {tokens_before}→{tokens_after} ({direction})"
-        )
-
-
-# ===========================================================================
-# CCP-v2: Value-Reference Scoring + LLM Summaries + Working Memory
-# ===========================================================================
-
-
 class WorkingMemory:
     """
     Structured state extracted from every tool output.
@@ -280,7 +131,7 @@ class WorkingMemory:
         self.known_ids:     Dict[str, Any] = {}
         self._n_steps:      int            = 0
 
-    def update(self, tool_name: str, tool_input: Dict, tool_output: str) -> None:
+    def update(self, tool_name: str, tool_output: str) -> None:
         self._n_steps += 1
         app = tool_name.split("__")[0] if "__" in tool_name else tool_name
         try:
@@ -311,33 +162,19 @@ class WorkingMemory:
         lines.append(f"Steps taken   : {self._n_steps}")
         return "\n".join(lines)
 
-    def token_count(self) -> int:
-        return max(1, len(self.to_block()) // 4)
 
-
-class CCPv2ContextManager:
+class CCPContextManager:
     """
-    CCP v2 — three targeted improvements over CCP v1:
+    Causal Context Pruning — upgraded with deterministic value-reference
+    scoring and working memory.
 
-    1. Value-Reference Scoring  (replaces LLM φ scorer)
-       φ = 0.92 when any output value appears in a later tool input — exact,
-       deterministic, zero LLM overhead.  φ = 0.10 otherwise.
-       retention_ratio floor then promotes unreferenced elements to RELEVANT
-       so at least that fraction receives an LLM summary.
-
-    2. LLM Summaries  (same as CCP v1 for RELEVANT tier)
-       Unreferenced-but-retained elements get the same dense LLM summary as
-       original CCP, preserving narrative state the agent needs.
-
-    3. Working Memory
-       A structured {access_tokens, known_ids} dict is always prepended.
-       Critical credentials and IDs survive even the most aggressive compression.
-
-    Context layout after compression:
-        [WORKING MEMORY]
-        [ACTIVE  — directly referenced steps, verbatim]
-        [RELEVANT — retention-floor steps, LLM summary]
-        [INERT   — remaining steps, one-line digest]
+    Improvements over the original:
+    - ValueRegistry replaces the LLM φ scorer: exact, deterministic, zero
+      extra LLM calls. φ=0.92 when an output value is reused in a later
+      input; φ=0.10 otherwise. retention_ratio then promotes unreferenced
+      elements to RELEVANT so they receive LLM summaries.
+    - WorkingMemory is always prepended to the context: access tokens and
+      known IDs survive even the most aggressive compression event.
     """
 
     def __init__(
@@ -345,23 +182,25 @@ class CCPv2ContextManager:
         tau_high:          float          = DEFAULT_TAU_HIGH,
         tau_low:           float          = DEFAULT_TAU_LOW,
         token_threshold:   int            = DEFAULT_TOKEN_THRESHOLD,
+        use_heuristics:    bool           = True,
         compress_relevant: bool           = True,
         retention_ratio:   Optional[float] = None,
-    ) -> None:
+    ):
         self.tau_high          = tau_high
         self.tau_low           = tau_low
         self.token_threshold   = token_threshold
+        self.use_heuristics    = use_heuristics
         self.compress_relevant = compress_relevant
         self.retention_ratio   = retention_ratio
 
-        self._context   = AgentContext(goal="")
-        self._step      = 0
-        self._stats_log: List[CCPStats] = []
-        self._registry  = ValueRegistry()
-        self._memory    = WorkingMemory()
+        self._context:    AgentContext   = AgentContext(goal="")
+        self._step:       int            = 0
+        self._stats_log:  List[CCPStats] = []
+        self._registry    = ValueRegistry()
+        self._memory      = WorkingMemory()
 
     # ------------------------------------------------------------------ #
-    # Public interface  (same as CCPContextManager)                       #
+    # Public interface                                                     #
     # ------------------------------------------------------------------ #
 
     def set_goal(self, goal: str) -> None:
@@ -377,7 +216,7 @@ class CCPv2ContextManager:
         self._step += 1
         self._registry.register_input(self._step, str(tool_input))
         self._registry.register_output(self._step, tool_output)
-        self._memory.update(tool_name, tool_input, tool_output)
+        self._memory.update(tool_name, tool_output)
 
         element = ContextElement(
             step=self._step,
@@ -419,19 +258,15 @@ class CCPv2ContextManager:
         return e
 
     def _run_compression(self) -> None:
-        elements = [e for e in self._context.elements if e.step > 0]
-        n_before = len(elements)
-        if not elements:
-            return
-
+        # Exclude working-memory sentinel injected by a previous compression
+        elements      = [e for e in self._context.elements if e.step > 0]
+        n_before      = len(elements)
         tokens_before = self._context.total_tokens()
 
-        # Score using ValueRegistry — deterministic, zero LLM scorer calls
+        # Score with ValueRegistry — deterministic, zero LLM scorer calls
         for e in elements:
             e.phi = self._registry.phi(e.step)
 
-        # Partition into tiers; retention_ratio floor promotes unreferenced
-        # elements from INERT → RELEVANT so they receive LLM summaries
         active, relevant, inert = assign_tiers(
             elements,
             tau_high=self.tau_high,
@@ -439,7 +274,6 @@ class CCPv2ContextManager:
             retention_ratio=self.retention_ratio,
         )
 
-        # RELEVANT → LLM summary (same quality as original CCP)
         if self.compress_relevant:
             for e in relevant:
                 if e.compressed_output is None:
@@ -448,24 +282,15 @@ class CCPv2ContextManager:
                     except Exception:
                         e.compressed_output = _compress_to_digest(e)
 
-        # INERT → one-line digest
         for e in inert:
             if e.compressed_output is None:
                 e.compressed_output = _compress_to_digest(e)
 
-        # Working memory prepended — always survives
+        # Prepend working memory — always survives compression
         self._context.elements = [self._make_wm_element()] + active + relevant + inert
 
         tokens_after = self._context.total_tokens()
-        delta        = (1 - tokens_after / max(tokens_before, 1)) * 100
-        direction    = f"-{delta:.1f}%" if delta > 0.05 else f"+{abs(delta):.1f}%"
-
-        print(
-            f"[CCP-v2] Step {self._step}: {n_before} elements → "
-            f"active={len(active)}, relevant={len(relevant)}, inert={len(inert)} | "
-            f"tokens {tokens_before}→{tokens_after} ({direction})"
-        )
-
+        scorer_calls = 0  # ValueRegistry uses zero LLM scorer calls
         self._stats_log.append(CCPStats(
             step=self._step,
             total_elements=n_before,
@@ -474,5 +299,16 @@ class CCPv2ContextManager:
             inert_count=len(inert),
             tokens_before=tokens_before,
             tokens_after=tokens_after,
-            scorer_calls=0,
+            scorer_calls=scorer_calls,
         ))
+
+        delta_pct = (1 - tokens_after / max(tokens_before, 1)) * 100
+        direction = (f"-{delta_pct:.1f}% reduction" if delta_pct > 0.05
+                     else f"+{abs(delta_pct):.1f}% growth" if delta_pct < -0.05
+                     else "no change")
+        print(
+            f"[CCP] Step {self._step}: {n_before} elements → "
+            f"active={len(active)}, relevant={len(relevant)}, inert={len(inert)} | "
+            f"tokens {tokens_before}→{tokens_after} ({direction})"
+        )
+
