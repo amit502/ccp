@@ -134,7 +134,9 @@ spec:
                 sleep 5
               done
 
-              # Run experiments from /app so ccp is a proper package
+              # Setup complete. Disable set -e so Python experiment errors
+              # don't kill the job — partial CSV results are saved on the PVC.
+              set +e
               cd /app
 
               # ── 8. Run ACON offline optimization ────────────────────────
@@ -153,6 +155,7 @@ spec:
                   --experiment ${EXPERIMENT} \
                   --tasks ${MAX_TASKS} \
                   --steps ${MAX_STEPS}
+              echo "Experiment exit code: $?"
 
               # ── 10. Cleanup ─────────────────────────────────────────────
               kill ${APIS_PID} 2>/dev/null || true
@@ -162,6 +165,7 @@ spec:
               ls -lh ${RESULTS_PATH}/*.csv 2>/dev/null || echo "  none found"
               echo "Pinned task IDs: ${TASK_IDS_FILE}"
               cat ${TASK_IDS_FILE} 2>/dev/null || true
+              exit 0
 
           volumeMounts:
             - name: git-repo
