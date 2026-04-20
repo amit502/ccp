@@ -443,7 +443,10 @@ class CCPv2ContextManager:
         if self.compress_relevant:
             for e in relevant:
                 if e.compressed_output is None:
-                    e.compressed_output = _compress_to_summary(e)
+                    try:
+                        e.compressed_output = _compress_to_summary(e)
+                    except Exception:
+                        e.compressed_output = _compress_to_digest(e)
 
         # INERT → one-line digest
         for e in inert:

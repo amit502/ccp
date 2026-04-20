@@ -143,7 +143,8 @@ spec:
                 python3 -m ccp.experiments.run_experiment \
                   --experiment acon_optimize \
                   --benchmark appworld \
-                  --tasks ${MAX_TASKS}
+                  --tasks ${MAX_TASKS} \
+              || echo "[WARN] ACON optimization failed — continuing without guidelines"
 
               # ── 9. Run all methods on AppWorld ──────────────────────────
               echo "=== Running AppWorld: all 7 methods ==="
