@@ -35,9 +35,8 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 # Results written directly to RESULTS_PATH (set by Kubernetes job YAML)
 RESULTS_DIR = Path(os.environ.get("RESULTS_PATH", "results"))
@@ -61,20 +60,13 @@ def _compression_methods(token_threshold: int) -> List[tuple]:
     from ..baselines.acon import ACONContextManager
     from ..context_manager import CCPContextManager
 
-    TAU_HIGH        = float(os.environ.get("TAU_HIGH",        "0.6"))
-    TAU_LOW         = float(os.environ.get("TAU_LOW",         "0.3"))
-    _rr             = os.environ.get("RETENTION_RATIO", "")
-    RETENTION_RATIO = float(_rr) if _rr else None
-
     return [
         ("no_compression",   lambda t=token_threshold: NoCompression(token_threshold=t)),
         ("fifo",             lambda t=token_threshold: FIFOManager(token_threshold=t)),
         ("token_perplexity", lambda t=token_threshold: TokenPerplexityManager(token_threshold=t)),
         ("retrieval",        lambda t=token_threshold: RetrievalBasedManager(token_threshold=t)),
         ("acon",             lambda t=token_threshold: ACONContextManager(token_threshold=t)),
-        ("ccp",              lambda t=token_threshold, h=TAU_HIGH, l=TAU_LOW, r=RETENTION_RATIO:
-                             CCPContextManager(tau_high=h, tau_low=l, token_threshold=t,
-                                              use_heuristics=True, retention_ratio=r)),
+        ("ccp",              lambda t=token_threshold: CCPContextManager(token_threshold=t)),
     ]
 
 
@@ -377,9 +369,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
     in the optimizer's task_runner. ACON will run on OfficeBench without guidelines.
     """
     import asyncio
-    from ..baselines.acon import (
-        ACONContextManager, ACONOfflineOptimizer, save_guidelines,
-    )
+    from ..baselines.acon import ACONOfflineOptimizer
     from ..benchmarks.mcp_runner import _run_one_task
 
     if benchmark == "officebench":
@@ -420,7 +410,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
             manager=manager,
             server_configs=train_runner._server_configs(),
             max_steps=30,
-            score_fn=lambda tid, fs: 1.0 if fs.get("done") else 0.0,
+            score_fn=lambda _, fs: 1.0 if fs.get("done") else 0.0,
             verbose=True,
             cached_tools=train_runner._tools,
             interceptor=train_runner._interceptor,
@@ -431,7 +421,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
 
         return manager.get_compressed_context().elements, result.success
 
-    guidelines = optimizer.run(task_runner, tasks)
+    optimizer.run(task_runner, tasks)
     print(f"\n[ACON] Optimization complete. Guidelines at: {_acon_module.GUIDELINES_PATH}")
 
 
