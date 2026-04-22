@@ -52,6 +52,11 @@ spec:
               echo "=== CCP OfficeBench Job ==="
               echo "Started: $(date)"
 
+              # ── 0. Raise inotify / fd limits before anything opens files ──
+              echo 524288 > /proc/sys/fs/inotify/max_user_watches   || true
+              echo 524288 > /proc/sys/fs/inotify/max_user_instances || true
+              ulimit -n 65535 || true
+
               # ── 1. System dependencies ──────────────────────────────────
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
