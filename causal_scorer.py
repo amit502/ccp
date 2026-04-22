@@ -66,6 +66,7 @@ class ValueRegistry:
     def __init__(self) -> None:
         self._outputs:    Dict[int, FrozenSet[str]] = {}   # step → values
         self._referenced: Set[int] = set()                 # steps marked active
+        self._parents:    Dict[int, Set[int]] = {}         # step → steps it depends on
 
     # -- registration --------------------------------------------------------
 
@@ -81,11 +82,14 @@ class ValueRegistry:
 
     def register_input(self, current_step: int, input_text: str) -> None:
         """Scan a tool input and mark past steps whose values appear in it."""
+        parents: Set[int] = set()
         for past_step, values in self._outputs.items():
-            if past_step >= current_step or past_step in self._referenced:
+            if past_step >= current_step:
                 continue
             if any(v in input_text for v in values):
                 self._referenced.add(past_step)
+                parents.add(past_step)
+        self._parents[current_step] = parents
 
     # -- scoring -------------------------------------------------------------
 
@@ -94,6 +98,10 @@ class ValueRegistry:
 
     def output_values(self, step: int) -> FrozenSet[str]:
         return self._outputs.get(step, frozenset())
+
+    def get_parents(self, step: int) -> Set[int]:
+        """Return the set of steps whose output values were used by this step."""
+        return self._parents.get(step, set())
 
 # ---------------------------------------------------------------------------
 # MCP-aware heuristics (fast path — no LLM call needed)

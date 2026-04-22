@@ -1,18 +1,20 @@
 """
 context_manager.py
 
-Causal Context Pruning (CCP) — Selective Value Preservation.
+Causal Context Pruning (CCP) — Dead Branch Elimination (DBE).
 
-Core idea: an agent only needs two things from its history —
-  1. The VALUES it will reuse (auth tokens, entity IDs, task outputs)
-  2. What just happened (immediate context)
+Core idea: treat the agent trajectory as a directed dependency graph.
+Each step S depends on the steps whose output values it used in its input.
+Dead branches — steps that are ancestors of abandoned sub-paths, not of
+the current live path — are completely dropped.
 
-Everything else is noise. This manager keeps exactly that:
-
-  ACTIVE    steps: output contained values reused in later inputs → kept,
-                   but compacted to just the reused key-value pairs.
-  RECENT    steps: last RECENT_WINDOW steps → kept verbatim.
-  All other steps: dropped completely (no digests, no summaries).
+Algorithm:
+  1. Identify RECENT steps (last N) as the "live frontier".
+  2. BFS backward from the live frontier, following parent edges
+     (step S's parents = steps whose values S's input referenced).
+  3. LIVE ANCESTORS: kept, but compacted to just the referenced key-values.
+  4. RECENT steps: kept verbatim (agent needs immediate context).
+  5. Everything else (dead branches): dropped completely.
 
 No LLM calls. Fully deterministic. Compression fires when total tokens
 exceed token_threshold.
@@ -75,16 +77,17 @@ def _compact(element: ContextElement, referenced_values: set) -> str:
 
 class CCPContextManager:
     """
-    Selective Value Preservation — deterministic, zero LLM calls.
+    Dead Branch Elimination — deterministic, zero LLM calls.
 
     After each compression event the context contains only:
-      • Causally active steps  (φ=0.92): output compacted to reused values
-      • Recent steps (last 2): verbatim — agent needs immediate context
-      • Everything else: dropped
+      • Live ancestors (BFS from recent steps): output compacted to reused values
+      • Recent steps (last N): verbatim — agent needs immediate context
+      • Dead branches: dropped completely
 
-    Because the compacted outputs are small (just the IDs and tokens the
-    agent will actually use), peak tokens stay well below methods that keep
-    full history or LLM-generated summaries.
+    "Dead branch" = a step referenced only within an abandoned sub-path,
+    not on the dependency chain leading to the current live step.
+    This eliminates the token overhead of keeping every-ever-referenced step,
+    keeping only the minimal ancestor set needed for the current trajectory.
     """
 
     def __init__(
@@ -147,6 +150,22 @@ class CCPContextManager:
     # Compression pipeline                                                 #
     # ------------------------------------------------------------------ #
 
+    def _live_ancestors(self, recent_steps: set) -> set:
+        """
+        BFS backward from recent_steps, following parent edges.
+        Returns the set of all ancestor step numbers reachable from
+        recent steps via the dependency graph — the live ancestry.
+        """
+        live: set = set(recent_steps)
+        queue = list(recent_steps)
+        while queue:
+            step = queue.pop()
+            for parent in self._registry.get_parents(step):
+                if parent not in live:
+                    live.add(parent)
+                    queue.append(parent)
+        return live
+
     def _run_compression(self) -> None:
         elements = [e for e in self._context.elements if e.step > 0]
         if not elements:
@@ -155,22 +174,22 @@ class CCPContextManager:
         n_before      = len(elements)
         tokens_before = self._context.total_tokens()
 
-        recent_steps = {e.step for e in elements[-self.recent_window:]}
+        recent_steps  = {e.step for e in elements[-self.recent_window:]}
+        live_set      = self._live_ancestors(recent_steps)
 
         kept: List[ContextElement] = []
         n_active = n_inert = 0
 
         for e in elements:
-            phi = self._registry.phi(e.step)
-            e.phi = phi
+            e.phi = self._registry.phi(e.step)
 
             if e.step in recent_steps:
-                # Recent: keep verbatim, mark active
+                # Live frontier: keep verbatim
                 e.tier = CompressionTier.ACTIVE
                 kept.append(e)
                 n_active += 1
-            elif phi >= 0.7:
-                # Causally referenced: compact to just the reused values
+            elif e.step in live_set:
+                # Live ancestor: compact to just the referenced values
                 e.tier = CompressionTier.ACTIVE
                 if e.compressed_output is None:
                     values = self._registry.output_values(e.step)
@@ -178,7 +197,7 @@ class CCPContextManager:
                 kept.append(e)
                 n_active += 1
             else:
-                # Not referenced, not recent: drop completely
+                # Dead branch or unreferenced: drop completely
                 e.tier = CompressionTier.INERT
                 n_inert += 1
 
@@ -199,8 +218,8 @@ class CCPContextManager:
         ))
 
         print(
-            f"[CCP] Step {self._step}: kept {n_active}/{n_before} "
-            f"(+{n_active - self.recent_window} referenced, "
-            f"dropped {n_inert}) | "
+            f"[CCP-DBE] Step {self._step}: kept {n_active}/{n_before} "
+            f"({len(recent_steps)} recent + {n_active - len(recent_steps)} ancestors, "
+            f"dropped {n_inert} dead) | "
             f"tokens {tokens_before}→{tokens_after} (-{delta:.1f}%)"
         )
