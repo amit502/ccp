@@ -80,8 +80,20 @@ spec:
               cd ${OFFICEBENCH_PATH}
               pip3 install -r requirements.txt -q
 
-              # ── 4. Start OfficeBench server in background ───────────────
-              python3 server.py --port 8001 &
+              # ── 4. Clone and install CCP ────────────────────────────────
+              # Must happen before server start — server script lives in CCP repo.
+              git clone https://github.com/amit502/ccp.git ${REPO_PATH}
+              cd ${REPO_PATH}
+              pip3 install -r requirements.txt -q
+              pip3 install -e . --no-deps -q
+              # Flask + office libs needed by officebench_server.py
+              pip3 install flask python-docx openpyxl python-pptx -q
+
+              # ── 5. Start OfficeBench server in background ───────────────
+              OFFICEBENCH_TASKS_DIR=${OFFICEBENCH_TASKS_DIR} \
+                python3 ${REPO_PATH}/officebench_server.py \
+                  --port 8001 \
+                  --tasks-dir ${OFFICEBENCH_TASKS_DIR} &
               OB_PID=$!
 
               for i in $(seq 1 12); do
@@ -92,12 +104,6 @@ spec:
                 echo "  Waiting for OfficeBench... (${i}/12)"
                 sleep 5
               done
-
-              # ── 5. Clone and install CCP ────────────────────────────────
-              git clone https://github.com/amit502/ccp.git ${REPO_PATH}
-              cd ${REPO_PATH}
-              pip3 install -r requirements.txt -q
-              pip3 install -e . --no-deps -q
 
               # ── 6. Create results directories ───────────────────────────
               mkdir -p ${RESULTS_PATH}
