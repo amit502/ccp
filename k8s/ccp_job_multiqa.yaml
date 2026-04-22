@@ -32,6 +32,8 @@ spec:
               value: "1"
             - name: TOKEN_THRESHOLD
               value: "500"
+            - name: GIT_TERMINAL_PROMPT
+              value: "0"
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
