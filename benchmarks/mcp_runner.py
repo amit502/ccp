@@ -397,12 +397,14 @@ class OfficeBenchMCPRunner:
                 print(f"[OfficeBench] Saved {len(tasks)} task IDs → {pin_file}")
         return tasks
 
-    def _init_task(self, task_id: str) -> None:
-        """Initialise task environment on the OfficeBench server before MCP session."""
-        self._client.post(
+    def _init_task(self, task_id: str) -> List[str]:
+        """Initialise task environment. Returns list of files in workspace."""
+        r = self._client.post(
             f"{OFFICEBENCH_URL}/tasks/{task_id}/init",
             timeout=30,
-        ).raise_for_status()
+        )
+        r.raise_for_status()
+        return r.json().get("files", [])
 
     def _server_configs(self, task_id: str, app: str) -> Dict[str, Any]:
         """
@@ -440,13 +442,14 @@ class OfficeBenchMCPRunner:
         for task in self._tasks:
             # Initialise task environment via REST BEFORE opening MCP session
             try:
-                self._init_task(task.id)
+                workspace_files = self._init_task(task.id)
             except Exception as e:
                 print(f"  [OfficeBench] init failed for {task.id}: {e}")
                 continue
 
             manager = manager_factory()
-            manager.set_goal(task.goal)
+            goal    = task.goal + (f"\n\nFiles in workspace: {workspace_files}" if workspace_files else "")
+            manager.set_goal(goal)
             configs = self._server_configs(task.id, getattr(task, "app", "word"))
 
             result = await _run_one_task(

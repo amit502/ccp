@@ -220,11 +220,20 @@ def _exec_word(state: Dict, action: str, params: Dict) -> Dict:
         path = Path(_p(params, "path", "file_path", "filename", "file"))
         if not path.is_absolute():
             path = work_dir / path
-        # If file not found, search work_dir for a matching filename
+        # Case-insensitive and fuzzy fallback search
         if not path.exists():
-            matches = list(work_dir.glob(f"*{path.name}")) or list(work_dir.glob("*.docx"))
-            if matches:
-                path = matches[0]
+            name_lower = path.name.lower().replace("_", " ").replace("-", " ")
+            candidates = list(work_dir.glob("*.docx"))
+            for c in candidates:
+                if c.name.lower().replace("_", " ").replace("-", " ") == name_lower:
+                    path = c
+                    break
+            else:
+                if candidates:
+                    path = candidates[0]
+        if not path.exists():
+            available = [f.name for f in sorted(work_dir.iterdir())]
+            return {"observation": f"File not found: {path.name}. Files in workspace: {available}", "status": "error"}
         try:
             doc = docx.Document(str(path))
         except Exception as e:
@@ -321,9 +330,18 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
         if not path.is_absolute():
             path = work_dir / path
         if not path.exists():
-            matches = list(work_dir.glob(f"*{path.name}")) or list(work_dir.glob("*.xlsx"))
-            if matches:
-                path = matches[0]
+            name_lower = path.name.lower().replace("_", " ").replace("-", " ")
+            candidates = list(work_dir.glob("*.xlsx"))
+            for c in candidates:
+                if c.name.lower().replace("_", " ").replace("-", " ") == name_lower:
+                    path = c
+                    break
+            else:
+                if candidates:
+                    path = candidates[0]
+        if not path.exists():
+            available = [f.name for f in sorted(work_dir.iterdir())]
+            return {"observation": f"File not found: {path.name}. Files in workspace: {available}", "status": "error"}
         try:
             wb = openpyxl.load_workbook(str(path))
         except Exception as e:
@@ -401,9 +419,18 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
         if not path.is_absolute():
             path = work_dir / path
         if not path.exists():
-            matches = list(work_dir.glob(f"*{path.name}")) or list(work_dir.glob("*.pptx"))
-            if matches:
-                path = matches[0]
+            name_lower = path.name.lower().replace("_", " ").replace("-", " ")
+            candidates = list(work_dir.glob("*.pptx"))
+            for c in candidates:
+                if c.name.lower().replace("_", " ").replace("-", " ") == name_lower:
+                    path = c
+                    break
+            else:
+                if candidates:
+                    path = candidates[0]
+        if not path.exists():
+            available = [f.name for f in sorted(work_dir.iterdir())]
+            return {"observation": f"File not found: {path.name}. Files in workspace: {available}", "status": "error"}
         try:
             prs = Presentation(str(path)) if path.exists() else Presentation()
         except Exception as e:
@@ -777,8 +804,10 @@ def init_task(task_id: str):
     if task is None:
         return jsonify({"error": "Task not found"}), 404
     state = _init_task_env(task_id, task)
+    files = [f.name for f in sorted(state["work_dir"].iterdir())]
     return jsonify({"status": "ok", "task_id": task_id, "app": task["app"],
                     "instruction": task["instruction"],
+                    "files": files,
                     "work_dir": str(state["work_dir"])})
 
 
