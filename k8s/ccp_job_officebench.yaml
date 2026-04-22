@@ -40,11 +40,6 @@ spec:
               value: "500"
             - name: GIT_TERMINAL_PROMPT
               value: "0"
-            - name: GITHUB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: github-secret
-                  key: token
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -81,7 +76,7 @@ spec:
               echo "Xvfb started on display :99"
 
               # ── 3. Clone OfficeBench ────────────────────────────────────
-              git clone https://${GITHUB_TOKEN}@github.com/zlwangx/OfficeBench.git ${OFFICEBENCH_PATH}
+              git clone https://github.com/zlwang-cs/OfficeBench.git ${OFFICEBENCH_PATH}
               cd ${OFFICEBENCH_PATH}
               pip3 install -r requirements.txt -q
 
