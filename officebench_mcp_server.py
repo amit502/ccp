@@ -32,29 +32,29 @@ OFFICEBENCH_URL = os.environ.get("OFFICEBENCH_URL", "http://localhost:8001")
 
 TOOL_SCHEMAS: Dict[str, List[Dict]] = {
     "word": [
-        {"name": "word__open_document",   "desc": "Open a Word document by path.",
-         "params": {"path": "string"}},
+        {"name": "word__open_document",   "desc": "Open a Word document. Returns doc_id for subsequent calls.",
+         "params": {"file_path": "string"}},
         {"name": "word__read_content",    "desc": "Read full text content of open document.",
          "params": {"doc_id": "string"}},
-        {"name": "word__insert_text",     "desc": "Insert text at a position in the document.",
-         "params": {"doc_id": "string", "text": "string", "position": "string"}},
+        {"name": "word__insert_text",     "desc": "Insert text into the document.",
+         "params": {"doc_id": "string", "text": "string"}},
         {"name": "word__replace_text",    "desc": "Replace all occurrences of find_text with replace_text.",
          "params": {"doc_id": "string", "find_text": "string", "replace_text": "string"}},
         {"name": "word__add_heading",     "desc": "Add a heading to the document.",
          "params": {"doc_id": "string", "text": "string", "level": "integer"}},
         {"name": "word__add_table",       "desc": "Add a table with given rows and columns.",
          "params": {"doc_id": "string", "rows": "integer", "cols": "integer"}},
-        {"name": "word__save_document",   "desc": "Save document to path.",
-         "params": {"doc_id": "string", "path": "string"}},
+        {"name": "word__save_document",   "desc": "Save document. Saves to original path if file_path omitted.",
+         "params": {"doc_id": "string", "file_path": "string"}},
         {"name": "word__close_document",  "desc": "Close an open document.",
          "params": {"doc_id": "string"}},
     ],
     "excel": [
-        {"name": "excel__open_workbook",  "desc": "Open an Excel workbook by path.",
-         "params": {"path": "string"}},
-        {"name": "excel__read_cell",      "desc": "Read value from a cell.",
+        {"name": "excel__open_workbook",  "desc": "Open an Excel workbook. Returns workbook_id for subsequent calls.",
+         "params": {"file_path": "string"}},
+        {"name": "excel__read_cell",      "desc": "Read value from a cell (e.g. cell='A1').",
          "params": {"workbook_id": "string", "sheet": "string", "cell": "string"}},
-        {"name": "excel__read_range",     "desc": "Read a range of cells.",
+        {"name": "excel__read_range",     "desc": "Read a range of cells (e.g. range='A1:C5').",
          "params": {"workbook_id": "string", "sheet": "string", "range": "string"}},
         {"name": "excel__write_cell",     "desc": "Write a value to a cell.",
          "params": {"workbook_id": "string", "sheet": "string", "cell": "string", "value": "string"}},
@@ -62,18 +62,20 @@ TOOL_SCHEMAS: Dict[str, List[Dict]] = {
          "params": {"workbook_id": "string", "sheet": "string", "cell": "string", "formula": "string"}},
         {"name": "excel__create_chart",   "desc": "Create a chart from a data range.",
          "params": {"workbook_id": "string", "chart_type": "string", "data_range": "string", "title": "string"}},
-        {"name": "excel__save_workbook",  "desc": "Save workbook.",
-         "params": {"workbook_id": "string", "path": "string"}},
+        {"name": "excel__save_workbook",  "desc": "Save workbook. Saves to original path if file_path omitted.",
+         "params": {"workbook_id": "string", "file_path": "string"}},
     ],
     "powerpoint": [
-        {"name": "powerpoint__open_presentation",  "desc": "Open a PowerPoint file.",
-         "params": {"path": "string"}},
-        {"name": "powerpoint__add_slide",          "desc": "Add a new slide.",
-         "params": {"pptx_id": "string", "layout": "string", "title": "string"}},
+        {"name": "powerpoint__open_presentation",  "desc": "Open a PowerPoint file. Returns pptx_id for subsequent calls.",
+         "params": {"file_path": "string"}},
+        {"name": "powerpoint__read_slide",         "desc": "Read text content of a slide.",
+         "params": {"pptx_id": "string", "slide_num": "integer"}},
+        {"name": "powerpoint__add_slide",          "desc": "Add a new slide with optional title.",
+         "params": {"pptx_id": "string", "title": "string"}},
         {"name": "powerpoint__add_text_box",       "desc": "Add a text box to a slide.",
          "params": {"pptx_id": "string", "slide_num": "integer", "text": "string"}},
-        {"name": "powerpoint__save_presentation",  "desc": "Save presentation.",
-         "params": {"pptx_id": "string", "path": "string"}},
+        {"name": "powerpoint__save_presentation",  "desc": "Save presentation. Saves to original path if file_path omitted.",
+         "params": {"pptx_id": "string", "file_path": "string"}},
     ],
     "email": [
         {"name": "email__list_inbox",    "desc": "List emails in inbox.",
@@ -135,13 +137,12 @@ class OfficeBenchMCPServer:
         self._task_id = task_id
 
     def _build_tool(self, schema: Dict) -> mcp_types.Tool:
-        props    = {k: TYPE_MAP.get(v, {"type": "string"})
-                    for k, v in schema["params"].items()}
-        required = list(schema["params"].keys())
+        props = {k: TYPE_MAP.get(v, {"type": "string"})
+                 for k, v in schema["params"].items()}
         return mcp_types.Tool(
             name=schema["name"],
             description=schema["desc"],
-            inputSchema={"type": "object", "properties": props, "required": required},
+            inputSchema={"type": "object", "properties": props},
         )
 
     def _register_handlers(self):

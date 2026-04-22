@@ -163,9 +163,15 @@ def _init_task_env(task_id: str, task: Dict) -> Dict:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     tdir = Path(task["task_dir"])
-    for ext in ("*.docx", "*.xlsx", "*.pptx", "*.txt", "*.csv", "*.json"):
-        for f in tdir.glob(ext):
-            shutil.copy2(f, work_dir / f.name)
+
+    # OfficeBench stores initial files in a testbed/ subdirectory
+    testbed = tdir / "testbed"
+    src_dirs = [testbed, tdir] if testbed.exists() else [tdir]
+    for src_dir in src_dirs:
+        for ext in ("*.docx", "*.xlsx", "*.pptx", "*.txt", "*.csv"):
+            for f in src_dir.glob(ext):
+                shutil.copy2(f, work_dir / f.name)
+
     for fpath in task["data"].get("initial_files", []):
         src = Path(fpath) if Path(fpath).is_absolute() else tdir / fpath
         if src.exists():
@@ -186,6 +192,19 @@ def _get_state(task_id: str) -> Optional[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Parameter aliasing — LLMs use varied names for the same concept
+# ---------------------------------------------------------------------------
+
+def _p(params: Dict, *keys: str, default: str = "") -> str:
+    """Return the first non-empty value among the given key aliases."""
+    for k in keys:
+        v = params.get(k)
+        if v is not None and v != "":
+            return str(v)
+    return default
+
+
+# ---------------------------------------------------------------------------
 # Tool execution — word
 # ---------------------------------------------------------------------------
 
@@ -198,9 +217,14 @@ def _exec_word(state: Dict, action: str, params: Dict) -> Dict:
     work_dir = state["work_dir"]
 
     if action == "open_document":
-        path = Path(params.get("path", ""))
+        path = Path(_p(params, "path", "file_path", "filename", "file"))
         if not path.is_absolute():
             path = work_dir / path
+        # If file not found, search work_dir for a matching filename
+        if not path.exists():
+            matches = list(work_dir.glob(f"*{path.name}")) or list(work_dir.glob("*.docx"))
+            if matches:
+                path = matches[0]
         try:
             doc = docx.Document(str(path))
         except Exception as e:
@@ -210,24 +234,25 @@ def _exec_word(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": f"Opened {path.name}", "doc_id": doc_id, "status": "ok"}
 
     if action == "read_content":
-        entry = _open_docs.get(params.get("doc_id", ""))
+        entry = _open_docs.get(_p(params, "doc_id", "document_id", "id"))
         if not entry:
             return {"observation": "Document not open", "status": "error"}
         text = "\n".join(p.text for p in entry["doc"].paragraphs if p.text)
         return {"observation": text, "status": "ok"}
 
     if action == "insert_text":
-        entry = _open_docs.get(params.get("doc_id", ""))
+        entry = _open_docs.get(_p(params, "doc_id", "document_id", "id"))
         if not entry:
             return {"observation": "Document not open", "status": "error"}
         entry["doc"].add_paragraph(params.get("text", ""))
         return {"observation": "Text inserted", "status": "ok", "state_changed": True}
 
     if action == "replace_text":
-        entry = _open_docs.get(params.get("doc_id", ""))
+        entry = _open_docs.get(_p(params, "doc_id", "document_id", "id"))
         if not entry:
             return {"observation": "Document not open", "status": "error"}
-        find, replace = params.get("find_text", ""), params.get("replace_text", "")
+        find    = _p(params, "find_text", "find", "old_text", "search")
+        replace = _p(params, "replace_text", "replace", "new_text", "replacement")
         count = 0
         for para in entry["doc"].paragraphs:
             for run in para.runs:
@@ -237,7 +262,7 @@ def _exec_word(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": f"Replaced {count} occurrences", "status": "ok", "state_changed": count > 0}
 
     if action == "delete_text":
-        entry = _open_docs.get(params.get("doc_id", ""))
+        entry = _open_docs.get(_p(params, "doc_id", "document_id", "id"))
         if not entry:
             return {"observation": "Document not open", "status": "error"}
         target = params.get("text", "")
@@ -248,24 +273,24 @@ def _exec_word(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": "Text deleted", "status": "ok", "state_changed": True}
 
     if action == "add_heading":
-        entry = _open_docs.get(params.get("doc_id", ""))
+        entry = _open_docs.get(_p(params, "doc_id", "document_id", "id"))
         if not entry:
             return {"observation": "Document not open", "status": "error"}
         entry["doc"].add_heading(params.get("text", ""), level=int(params.get("level", 1)))
         return {"observation": "Heading added", "status": "ok", "state_changed": True}
 
     if action == "add_table":
-        entry = _open_docs.get(params.get("doc_id", ""))
+        entry = _open_docs.get(_p(params, "doc_id", "document_id", "id"))
         if not entry:
             return {"observation": "Document not open", "status": "error"}
         entry["doc"].add_table(rows=int(params.get("rows", 2)), cols=int(params.get("cols", 2)))
         return {"observation": "Table added", "status": "ok", "state_changed": True}
 
     if action == "save_document":
-        entry = _open_docs.get(params.get("doc_id", ""))
+        entry = _open_docs.get(_p(params, "doc_id", "document_id", "id"))
         if not entry:
             return {"observation": "Document not open", "status": "error"}
-        save_path = params.get("path", entry["path"])
+        save_path = _p(params, "path", "file_path", "filename") or entry["path"]
         if not Path(save_path).is_absolute():
             save_path = str(work_dir / save_path)
         entry["doc"].save(save_path)
@@ -273,7 +298,7 @@ def _exec_word(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": f"Saved to {save_path}", "status": "ok"}
 
     if action == "close_document":
-        _open_docs.pop(params.get("doc_id", ""), None)
+        _open_docs.pop(_p(params, "doc_id", "document_id", "id"), None)
         return {"observation": "Closed", "status": "ok"}
 
     return {"observation": f"Unknown word action: {action}", "status": "error"}
@@ -292,9 +317,13 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
     work_dir = state["work_dir"]
 
     if action == "open_workbook":
-        path = Path(params.get("path", ""))
+        path = Path(_p(params, "path", "file_path", "filename", "file"))
         if not path.is_absolute():
             path = work_dir / path
+        if not path.exists():
+            matches = list(work_dir.glob(f"*{path.name}")) or list(work_dir.glob("*.xlsx"))
+            if matches:
+                path = matches[0]
         try:
             wb = openpyxl.load_workbook(str(path))
         except Exception as e:
@@ -305,7 +334,7 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
                 "workbook_id": wb_id, "status": "ok"}
 
     if action == "read_cell":
-        entry = _open_wbs.get(params.get("workbook_id", ""))
+        entry = _open_wbs.get(_p(params, "workbook_id", "wb_id", "id"))
         if not entry:
             return {"observation": "Workbook not open", "status": "error"}
         ws = entry["wb"][params.get("sheet", entry["wb"].active.title)]
@@ -313,7 +342,7 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": str(val), "value": val, "status": "ok"}
 
     if action == "read_range":
-        entry = _open_wbs.get(params.get("workbook_id", ""))
+        entry = _open_wbs.get(_p(params, "workbook_id", "wb_id", "id"))
         if not entry:
             return {"observation": "Workbook not open", "status": "error"}
         ws = entry["wb"][params.get("sheet", entry["wb"].active.title)]
@@ -321,11 +350,11 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": json.dumps(data), "data": data, "status": "ok"}
 
     if action in ("write_cell", "apply_formula"):
-        entry = _open_wbs.get(params.get("workbook_id", ""))
+        entry = _open_wbs.get(_p(params, "workbook_id", "wb_id", "id"))
         if not entry:
             return {"observation": "Workbook not open", "status": "error"}
         ws = entry["wb"][params.get("sheet", entry["wb"].active.title)]
-        cell = params.get("cell", "A1")
+        cell  = params.get("cell", "A1")
         value = params.get("value") or params.get("formula")
         ws[cell] = value
         return {"observation": f"Set {cell}={value}", "status": "ok", "state_changed": True}
@@ -337,10 +366,10 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": "Chart created", "status": "ok", "state_changed": True}
 
     if action == "save_workbook":
-        entry = _open_wbs.get(params.get("workbook_id", ""))
+        entry = _open_wbs.get(_p(params, "workbook_id", "wb_id", "id"))
         if not entry:
             return {"observation": "Workbook not open", "status": "error"}
-        save_path = params.get("path", entry["path"])
+        save_path = _p(params, "path", "file_path", "filename") or entry["path"]
         if not Path(save_path).is_absolute():
             save_path = str(work_dir / save_path)
         entry["wb"].save(save_path)
@@ -348,7 +377,7 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": f"Saved to {save_path}", "status": "ok"}
 
     if action == "close_workbook":
-        _open_wbs.pop(params.get("workbook_id", ""), None)
+        _open_wbs.pop(_p(params, "workbook_id", "wb_id", "id"), None)
         return {"observation": "Closed", "status": "ok"}
 
     return {"observation": f"Unknown excel action: {action}", "status": "error"}
@@ -368,9 +397,13 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
     work_dir = state["work_dir"]
 
     if action == "open_presentation":
-        path = Path(params.get("path", ""))
+        path = Path(_p(params, "path", "file_path", "filename", "file"))
         if not path.is_absolute():
             path = work_dir / path
+        if not path.exists():
+            matches = list(work_dir.glob(f"*{path.name}")) or list(work_dir.glob("*.pptx"))
+            if matches:
+                path = matches[0]
         try:
             prs = Presentation(str(path)) if path.exists() else Presentation()
         except Exception as e:
@@ -381,7 +414,7 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
                 "pptx_id": ppt_id, "status": "ok"}
 
     if action == "read_slide":
-        entry = _open_pptx.get(params.get("pptx_id", ""))
+        entry = _open_pptx.get(_p(params, "pptx_id", "presentation_id", "id"))
         if not entry:
             return {"observation": "Presentation not open", "status": "error"}
         idx = int(params.get("slide_num", 1)) - 1
@@ -392,7 +425,7 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": text, "status": "ok"}
 
     if action == "add_slide":
-        entry = _open_pptx.get(params.get("pptx_id", ""))
+        entry = _open_pptx.get(_p(params, "pptx_id", "presentation_id", "id"))
         if not entry:
             return {"observation": "Presentation not open", "status": "error"}
         prs = entry["prs"]
@@ -403,7 +436,7 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
                 "status": "ok", "state_changed": True}
 
     if action == "add_text_box":
-        entry = _open_pptx.get(params.get("pptx_id", ""))
+        entry = _open_pptx.get(_p(params, "pptx_id", "presentation_id", "id"))
         if not entry:
             return {"observation": "Presentation not open", "status": "error"}
         prs = entry["prs"]
@@ -418,10 +451,10 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": "Image added", "status": "ok", "state_changed": True}
 
     if action == "save_presentation":
-        entry = _open_pptx.get(params.get("pptx_id", ""))
+        entry = _open_pptx.get(_p(params, "pptx_id", "presentation_id", "id"))
         if not entry:
             return {"observation": "Presentation not open", "status": "error"}
-        save_path = params.get("path", entry["path"])
+        save_path = _p(params, "path", "file_path", "filename") or entry["path"]
         if not Path(save_path).is_absolute():
             save_path = str(work_dir / save_path)
         entry["prs"].save(save_path)
@@ -429,7 +462,7 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
         return {"observation": f"Saved to {save_path}", "status": "ok"}
 
     if action == "close_presentation":
-        _open_pptx.pop(params.get("pptx_id", ""), None)
+        _open_pptx.pop(_p(params, "pptx_id", "presentation_id", "id"), None)
         return {"observation": "Closed", "status": "ok"}
 
     return {"observation": f"Unknown powerpoint action: {action}", "status": "error"}
@@ -530,18 +563,18 @@ def _exec_file_manager(state: Dict, action: str, params: Dict) -> Dict:
     work_dir = state["work_dir"]
 
     def resolve(p: str) -> Path:
-        pp = Path(p)
+        pp = Path(p) if p else Path(".")
         return pp if pp.is_absolute() else work_dir / pp
 
     if action == "list_directory":
-        path = resolve(params.get("path", "."))
+        path = resolve(_p(params, "path", "directory", "dir", default="."))
         if not path.exists():
             return {"observation": "Directory not found", "status": "error"}
         items = [f.name for f in sorted(path.iterdir())]
         return {"observation": json.dumps(items), "files": items, "status": "ok"}
 
     if action == "read_file":
-        path = resolve(params.get("path", ""))
+        path = resolve(_p(params, "path", "file_path", "filename", "file"))
         if not path.exists():
             return {"observation": "File not found", "status": "error"}
         try:
@@ -551,36 +584,36 @@ def _exec_file_manager(state: Dict, action: str, params: Dict) -> Dict:
             return {"observation": str(e), "status": "error"}
 
     if action == "copy_file":
-        src = resolve(params.get("src", ""))
-        dest = resolve(params.get("dest", ""))
+        src  = resolve(_p(params, "src", "source", "from"))
+        dest = resolve(_p(params, "dest", "destination", "to"))
         if not src.exists():
             return {"observation": "Source not found", "status": "error"}
         shutil.copy2(str(src), str(dest))
         return {"observation": f"Copied to {dest.name}", "status": "ok", "state_changed": True}
 
     if action == "move_file":
-        src = resolve(params.get("src", ""))
-        dest = resolve(params.get("dest", ""))
+        src  = resolve(_p(params, "src", "source", "from"))
+        dest = resolve(_p(params, "dest", "destination", "to"))
         if not src.exists():
             return {"observation": "Source not found", "status": "error"}
         shutil.move(str(src), str(dest))
         return {"observation": f"Moved to {dest.name}", "status": "ok", "state_changed": True}
 
     if action == "delete_file":
-        path = resolve(params.get("path", ""))
+        path = resolve(_p(params, "path", "file_path", "filename", "file"))
         if not path.exists():
             return {"observation": "File not found", "status": "error"}
         path.unlink()
         return {"observation": "Deleted", "status": "ok", "state_changed": True}
 
     if action == "create_directory":
-        path = resolve(params.get("path", ""))
+        path = resolve(_p(params, "path", "dir", "directory", "name"))
         path.mkdir(parents=True, exist_ok=True)
         return {"observation": f"Created {path.name}", "status": "ok", "state_changed": True}
 
     if action == "search_files":
-        directory = resolve(params.get("directory", "."))
-        pattern = params.get("pattern", "*")
+        directory = resolve(_p(params, "directory", "path", "dir", default="."))
+        pattern   = params.get("pattern", "*")
         hits = [str(p.relative_to(work_dir)) for p in directory.glob(f"**/{pattern}")]
         return {"observation": json.dumps(hits), "files": hits, "status": "ok"}
 
