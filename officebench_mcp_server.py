@@ -101,8 +101,12 @@ TOOL_SCHEMAS: Dict[str, List[Dict]] = {
          "params": {"event_id": "string"}},
     ],
     "file_manager": [
-        {"name": "file_manager__list_directory", "desc": "List directory contents.",
+        {"name": "file_manager__list_directory", "desc": "List all files in the workspace recursively. Use path='.' for full listing.",
          "params": {"path": "string"}},
+        {"name": "file_manager__read_file",      "desc": "Read text content of a file.",
+         "params": {"path": "string"}},
+        {"name": "file_manager__write_file",     "desc": "Write text content to a file. Creates parent directories if needed.",
+         "params": {"path": "string", "content": "string"}},
         {"name": "file_manager__move_file",      "desc": "Move a file to a destination.",
          "params": {"src": "string", "dest": "string"}},
         {"name": "file_manager__copy_file",      "desc": "Copy a file.",

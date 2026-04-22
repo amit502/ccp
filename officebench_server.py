@@ -164,12 +164,13 @@ def _init_task_env(task_id: str, task: Dict) -> Dict:
 
     tdir = Path(task["task_dir"])
 
-    # OfficeBench stores initial files in a testbed/ subdirectory
+    # OfficeBench stores initial files under testbed/ (may be nested: testbed/data/...)
     testbed = tdir / "testbed"
-    src_dirs = [testbed, tdir] if testbed.exists() else [tdir]
-    for src_dir in src_dirs:
+    if testbed.exists():
+        shutil.copytree(str(testbed), str(work_dir), dirs_exist_ok=True)
+    else:
         for ext in ("*.docx", "*.xlsx", "*.pptx", "*.txt", "*.csv"):
-            for f in src_dir.glob(ext):
+            for f in tdir.rglob(ext):
                 shutil.copy2(f, work_dir / f.name)
 
     for fpath in task["data"].get("initial_files", []):
@@ -217,13 +218,20 @@ def _exec_word(state: Dict, action: str, params: Dict) -> Dict:
     work_dir = state["work_dir"]
 
     if action == "open_document":
-        path = Path(_p(params, "path", "file_path", "filename", "file"))
+        raw = _p(params, "path", "file_path", "filename", "file",
+                 "document_path", "doc_path", "filepath", "name")
+        if not raw:
+            available = [str(f.relative_to(work_dir)) for f in sorted(work_dir.rglob("*")) if f.is_file()]
+            return {"observation": f"No filename provided. Files in workspace: {available}", "status": "error"}
+        path = Path(raw)
         if not path.is_absolute():
             path = work_dir / path
-        # Case-insensitive and fuzzy fallback search
+        if path.is_dir():
+            return {"observation": f"{path.name} is a directory, not a document", "status": "error"}
+        # Case-insensitive and fuzzy fallback search (recursive)
         if not path.exists():
             name_lower = path.name.lower().replace("_", " ").replace("-", " ")
-            candidates = list(work_dir.glob("*.docx"))
+            candidates = list(work_dir.rglob("*.docx"))
             for c in candidates:
                 if c.name.lower().replace("_", " ").replace("-", " ") == name_lower:
                     path = c
@@ -231,16 +239,14 @@ def _exec_word(state: Dict, action: str, params: Dict) -> Dict:
             else:
                 if candidates:
                     path = candidates[0]
-        if not path.exists():
-            available = [f.name for f in sorted(work_dir.iterdir())]
-            return {"observation": f"File not found: {path.name}. Files in workspace: {available}", "status": "error"}
         try:
-            doc = docx.Document(str(path))
+            doc = docx.Document(str(path)) if path.exists() else docx.Document()
         except Exception as e:
             return {"observation": str(e), "status": "error"}
         doc_id = str(uuid.uuid4())[:8]
         _open_docs[doc_id] = {"doc": doc, "path": str(path)}
-        return {"observation": f"Opened {path.name}", "doc_id": doc_id, "status": "ok"}
+        action_taken = "Opened" if path.exists() else "Created new"
+        return {"observation": f"{action_taken} {path.name}", "doc_id": doc_id, "status": "ok"}
 
     if action == "read_content":
         entry = _open_docs.get(_p(params, "doc_id", "document_id", "id"))
@@ -326,12 +332,13 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
     work_dir = state["work_dir"]
 
     if action == "open_workbook":
-        path = Path(_p(params, "path", "file_path", "filename", "file"))
+        path = Path(_p(params, "path", "file_path", "filename", "file",
+                       "workbook_path", "wb_path", "filepath", "name"))
         if not path.is_absolute():
             path = work_dir / path
         if not path.exists():
             name_lower = path.name.lower().replace("_", " ").replace("-", " ")
-            candidates = list(work_dir.glob("*.xlsx"))
+            candidates = list(work_dir.rglob("*.xlsx"))
             for c in candidates:
                 if c.name.lower().replace("_", " ").replace("-", " ") == name_lower:
                     path = c
@@ -339,16 +346,14 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
             else:
                 if candidates:
                     path = candidates[0]
-        if not path.exists():
-            available = [f.name for f in sorted(work_dir.iterdir())]
-            return {"observation": f"File not found: {path.name}. Files in workspace: {available}", "status": "error"}
         try:
-            wb = openpyxl.load_workbook(str(path))
+            wb = openpyxl.load_workbook(str(path)) if path.exists() else openpyxl.Workbook()
         except Exception as e:
             return {"observation": str(e), "status": "error"}
         wb_id = str(uuid.uuid4())[:8]
         _open_wbs[wb_id] = {"wb": wb, "path": str(path)}
-        return {"observation": f"Opened {path.name}. Sheets: {wb.sheetnames}",
+        action_taken = "Opened" if path.exists() else "Created new"
+        return {"observation": f"{action_taken} {path.name}. Sheets: {wb.sheetnames}",
                 "workbook_id": wb_id, "status": "ok"}
 
     if action == "read_cell":
@@ -415,12 +420,13 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
     work_dir = state["work_dir"]
 
     if action == "open_presentation":
-        path = Path(_p(params, "path", "file_path", "filename", "file"))
+        path = Path(_p(params, "path", "file_path", "filename", "file",
+                       "presentation_path", "pptx_path", "filepath", "name"))
         if not path.is_absolute():
             path = work_dir / path
         if not path.exists():
             name_lower = path.name.lower().replace("_", " ").replace("-", " ")
-            candidates = list(work_dir.glob("*.pptx"))
+            candidates = list(work_dir.rglob("*.pptx"))
             for c in candidates:
                 if c.name.lower().replace("_", " ").replace("-", " ") == name_lower:
                     path = c
@@ -428,16 +434,14 @@ def _exec_powerpoint(state: Dict, action: str, params: Dict) -> Dict:
             else:
                 if candidates:
                     path = candidates[0]
-        if not path.exists():
-            available = [f.name for f in sorted(work_dir.iterdir())]
-            return {"observation": f"File not found: {path.name}. Files in workspace: {available}", "status": "error"}
         try:
             prs = Presentation(str(path)) if path.exists() else Presentation()
         except Exception as e:
             return {"observation": str(e), "status": "error"}
         ppt_id = str(uuid.uuid4())[:8]
         _open_pptx[ppt_id] = {"prs": prs, "path": str(path)}
-        return {"observation": f"Opened. Slides: {len(prs.slides)}",
+        action_taken = "Opened" if path.exists() else "Created new"
+        return {"observation": f"{action_taken} {path.name}. Slides: {len(prs.slides)}",
                 "pptx_id": ppt_id, "status": "ok"}
 
     if action == "read_slide":
@@ -597,7 +601,7 @@ def _exec_file_manager(state: Dict, action: str, params: Dict) -> Dict:
         path = resolve(_p(params, "path", "directory", "dir", default="."))
         if not path.exists():
             return {"observation": "Directory not found", "status": "error"}
-        items = [f.name for f in sorted(path.iterdir())]
+        items = [str(f.relative_to(work_dir)) for f in sorted(path.rglob("*")) if f.is_file()]
         return {"observation": json.dumps(items), "files": items, "status": "ok"}
 
     if action == "read_file":
@@ -643,6 +647,13 @@ def _exec_file_manager(state: Dict, action: str, params: Dict) -> Dict:
         pattern   = params.get("pattern", "*")
         hits = [str(p.relative_to(work_dir)) for p in directory.glob(f"**/{pattern}")]
         return {"observation": json.dumps(hits), "files": hits, "status": "ok"}
+
+    if action == "write_file":
+        path = resolve(_p(params, "path", "file_path", "filename", "file"))
+        content = params.get("content", params.get("text", params.get("data", "")))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(content), encoding="utf-8")
+        return {"observation": f"Written {path.name}", "status": "ok", "state_changed": True}
 
     return {"observation": f"Unknown file_manager action: {action}", "status": "error"}
 
@@ -753,6 +764,12 @@ def _eval_contain(args: dict, state: Dict, work_dir: Path) -> int:
             return 1 if all(kw.lower() in text for kw in keywords) else 0
         except Exception:
             pass
+    if doc_type == "txt" and path and path.exists():
+        try:
+            text = path.read_text(errors="ignore").lower()
+            return 1 if all(kw.lower() in text for kw in keywords) else 0
+        except Exception:
+            pass
     if doc_type == "email":
         all_text = " ".join(e.get("subject", "") + " " + e.get("body", "")
                             for e in state.get("email_store", [])).lower()
@@ -804,7 +821,7 @@ def init_task(task_id: str):
     if task is None:
         return jsonify({"error": "Task not found"}), 404
     state = _init_task_env(task_id, task)
-    files = [f.name for f in sorted(state["work_dir"].iterdir())]
+    files = [str(f.relative_to(state["work_dir"])) for f in sorted(state["work_dir"].rglob("*")) if f.is_file()]
     return jsonify({"status": "ok", "task_id": task_id, "app": task["app"],
                     "instruction": task["instruction"],
                     "files": files,

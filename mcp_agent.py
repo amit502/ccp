@@ -186,7 +186,10 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
         tool_summary_parts.append(f"  [{app}]: {', '.join(tnames)}")
     tool_summary = "\n".join(tool_summary_parts)
 
-    system_text = f"""You are an autonomous agent. Complete the task by calling tools in sequence.
+    has_supervisor = bool(app_tools.get("supervisor"))
+
+    if has_supervisor:
+        system_text = f"""You are an autonomous agent. Complete the task by calling tools in sequence.
 
 GENERAL SEQUENCE:
 1. Call supervisor__show_active_task_active_task_get → read the "instruction" field
@@ -236,6 +239,31 @@ Goal: {state["goal"]}
 
 Stored credentials (use these access_tokens directly — do NOT login again if token exists):
 {chr(10).join(f"  {app}: access_token already obtained" for app in state.get("access_tokens", {}).keys()) or "  (none yet)"}"""
+    else:
+        system_text = f"""You are an office automation agent. Complete the task by calling the available tools.
+
+SEQUENCE:
+1. The task goal tells you what to do and lists the files available in the workspace.
+2. Open the relevant file using the open tool (e.g. word__open_document, excel__open_workbook).
+   - If the workspace is empty or the file doesn't exist yet, open it anyway — a new blank file will be created.
+   - Use the exact filename from the goal if provided.
+3. Make the required edits using insert, replace, write_cell, or similar tools.
+4. Save the file using the save tool (e.g. word__save_document).
+5. Respond FINISH once complete.
+
+TOOL CALL: {{"action":"tool_call","tool":"<exact_tool_name>","input":{{<real_params>}}}}
+FINISH:    {{"action":"finish","answer":"<summary of what you did>"}}
+
+RULES:
+- Only use tools from the list below — do NOT invent tool names.
+- If a file is not found, it will be created automatically — proceed with editing.
+- Save the document before finishing.
+- Respond with a JSON OBJECT only, no prose.
+
+Available tools:
+{tool_summary}
+
+Goal: {state["goal"]}"""
 
     # Build proper messages array — each tool call and result as its own turn
     # This is what the reasoning model needs to track conversation state
