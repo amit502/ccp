@@ -38,8 +38,6 @@ spec:
               value: "1"
             - name: TOKEN_THRESHOLD
               value: "500"
-            - name: RETENTION_RATIO
-              value: "0.65"
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -98,6 +96,8 @@ spec:
               mkdir -p ${RESULTS_PATH}
 
               # Run experiments from /app so ccp is a proper package
+              # Disable set -e so Python experiment errors don't kill the job.
+              set +e
               cd /app
 
               # ── 7. ACON optimization skipped for OfficeBench ────────────
@@ -112,6 +112,7 @@ spec:
                   --experiment ${EXPERIMENT} \
                   --tasks ${MAX_TASKS} \
                   --steps ${MAX_STEPS}
+              echo "Experiment exit code: $?"
 
               # ── 9. Cleanup ──────────────────────────────────────────────
               kill ${OB_PID}   2>/dev/null || true
@@ -120,6 +121,7 @@ spec:
               echo "=== Done: $(date) ==="
               echo "CSVs saved:"
               ls -lh ${RESULTS_PATH}/officebench*.csv 2>/dev/null || echo "  none found"
+              exit 0
 
           volumeMounts:
             - name: git-repo

@@ -32,8 +32,6 @@ spec:
               value: "1"
             - name: TOKEN_THRESHOLD
               value: "500"
-            - name: RETENTION_RATIO
-              value: "0.65"
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -74,6 +72,8 @@ spec:
               fi
 
               # Run experiments from /app so ccp is a proper package
+              # Disable set -e so Python experiment errors don't kill the job.
+              set +e
               cd /app
 
               # ── 5. Run ACON offline optimization ────────────────────────
@@ -82,7 +82,8 @@ spec:
                 python3 -m ccp.experiments.run_experiment \
                   --experiment acon_optimize \
                   --benchmark multiqa \
-                  --tasks ${MAX_TASKS}
+                  --tasks ${MAX_TASKS} \
+              || echo "[WARN] ACON optimization failed — continuing without guidelines"
 
               # ── 6. Run all 7 methods on Multi-QA ────────────────────────
               echo "=== Running Multi-QA: all 7 methods ==="
@@ -91,10 +92,12 @@ spec:
                   --experiment ${EXPERIMENT} \
                   --tasks ${MAX_TASKS} \
                   --steps ${MAX_STEPS}
+              echo "Experiment exit code: $?"
 
               echo "=== Done: $(date) ==="
               echo "CSVs saved:"
               ls -lh ${RESULTS_PATH}/multiqa*.csv 2>/dev/null || echo "  none found"
+              exit 0
 
           volumeMounts:
             - name: git-repo
