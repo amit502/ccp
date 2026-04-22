@@ -69,6 +69,16 @@ def _detect_app(hint: str, data: dict) -> str:
     return "word"
 
 
+def _detect_app_from_eval(data: dict) -> Optional[str]:
+    """Detect app from OfficeBench evaluation criteria (doc_type field)."""
+    for criterion in data.get("evaluation", []):
+        if isinstance(criterion, dict):
+            doc_type = criterion.get("args", {}).get("doc_type", "")
+            if doc_type in ("word", "excel", "powerpoint", "email", "calendar"):
+                return doc_type
+    return None
+
+
 def _load_tasks() -> List[Dict]:
     global _all_tasks
     if _all_tasks is not None:
@@ -82,19 +92,20 @@ def _load_tasks() -> List[Dict]:
     for entry in sorted(TASKS_DIR.iterdir()):
         if not entry.is_dir():
             continue
-        subtask_dir = entry / "subtask"
+        subtask_dir = entry / "subtasks"
         if subtask_dir.exists():
-            # OfficeBench nested: tasks/{n}-{id}/subtask/{m}.json
+            # OfficeBench format: tasks/{n}-{id}/subtasks/{m}.json
             for sf in sorted(subtask_dir.glob("*.json")):
                 try:
                     data = json.loads(sf.read_text())
                     task_id = f"{entry.name}_{sf.stem}"
                     tasks.append({
                         "id":          task_id,
-                        "instruction": (data.get("instruction")
+                        "instruction": (data.get("task")
+                                        or data.get("instruction")
                                         or data.get("task_description")
                                         or data.get("goal", "")),
-                        "app":         data.get("app") or _detect_app(entry.name, data),
+                        "app":         data.get("app") or _detect_app_from_eval(data) or _detect_app(entry.name, data),
                         "split":       "test",
                         "data":        data,
                         "task_dir":    str(entry),
@@ -619,12 +630,10 @@ def _evaluate_task(task_id: str) -> float:
     app      = task["app"]
     work_dir = state["work_dir"]
 
-    # Structured evaluation criteria from task definition
-    eval_data = data.get("evaluation", {})
-    if isinstance(eval_data, dict):
-        checks = eval_data.get("checks") or eval_data.get("criteria", [])
-        if checks:
-            return _check_criteria(checks, state, work_dir)
+    # OfficeBench format: evaluation is a list of {function, args} criteria
+    criteria = data.get("evaluation", [])
+    if isinstance(criteria, list) and criteria:
+        return _check_ob_criteria(criteria, state, work_dir)
 
     # Heuristic: was an output file produced?
     ext_map = {"word": "*.docx", "excel": "*.xlsx", "powerpoint": "*.pptx"}
@@ -638,25 +647,74 @@ def _evaluate_task(task_id: str) -> float:
     return 0.0
 
 
-def _check_criteria(checks: list, state: Dict, work_dir: Path) -> float:
-    if not checks:
+def _check_ob_criteria(criteria: list, state: Dict, work_dir: Path) -> float:
+    """Evaluate OfficeBench-format criteria: [{function, args}, ...]."""
+    if not criteria:
         return 0.0
     passed = 0
-    for check in checks:
-        ct = check.get("type", "")
-        if ct == "file_exists":
-            if (work_dir / check.get("path", "")).exists():
-                passed += 1
-        elif ct == "text_contains":
-            path = work_dir / check.get("path", "")
-            if path.exists() and check.get("text", "").lower() in path.read_text(errors="replace").lower():
-                passed += 1
-        elif ct == "email_sent":
-            if state.get("sent_emails"):
-                passed += 1
-        else:
-            passed += 1  # unknown check type: don't penalise
-    return passed / len(checks)
+    for c in criteria:
+        fn   = c.get("function", "")
+        args = c.get("args", {})
+        try:
+            if fn == "evaluate_contain":
+                passed += _eval_contain(args, state, work_dir)
+            elif fn == "evaluate_exist":
+                path = work_dir / args.get("file", "")
+                passed += 1 if path.exists() else 0
+            elif fn == "evaluate_equal":
+                passed += _eval_equal(args, state, work_dir)
+            else:
+                passed += 1  # unknown function: don't penalise
+        except Exception:
+            pass
+    return passed / len(criteria)
+
+
+def _eval_contain(args: dict, state: Dict, work_dir: Path) -> int:
+    """Check that a file contains all expected keywords."""
+    doc_type = args.get("doc_type", "")
+    file_rel = args.get("file", "")
+    keywords = args.get("keywords", [])
+    path     = work_dir / file_rel if file_rel else None
+
+    if doc_type in ("word",) and path and path.exists():
+        try:
+            import docx
+            doc  = docx.Document(str(path))
+            text = "\n".join(p.text for p in doc.paragraphs).lower()
+            return 1 if all(kw.lower() in text for kw in keywords) else 0
+        except Exception:
+            pass
+    if doc_type in ("excel",) and path and path.exists():
+        try:
+            import openpyxl
+            wb   = openpyxl.load_workbook(str(path))
+            text = " ".join(str(c.value) for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.value).lower()
+            return 1 if all(kw.lower() in text for kw in keywords) else 0
+        except Exception:
+            pass
+    if doc_type == "email":
+        all_text = " ".join(e.get("subject", "") + " " + e.get("body", "")
+                            for e in state.get("email_store", [])).lower()
+        return 1 if all(kw.lower() in all_text for kw in keywords) else 0
+    return 0
+
+
+def _eval_equal(args: dict, state: Dict, work_dir: Path) -> int:
+    """Check that a cell or field equals an expected value."""
+    doc_type = args.get("doc_type", "")
+    expected = str(args.get("expected", "")).lower()
+    if doc_type == "excel":
+        try:
+            import openpyxl
+            path = work_dir / args.get("file", "")
+            wb   = openpyxl.load_workbook(str(path))
+            ws   = wb.active
+            val  = str(ws[args.get("cell", "A1")].value or "").lower()
+            return 1 if val == expected else 0
+        except Exception:
+            pass
+    return 0
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,8 @@ spec:
             # Tasks dir inside the cloned OfficeBench repo
             - name: OFFICEBENCH_TASKS_DIR
               value: /app/officebench/tasks
+            - name: OFFICEBENCH_TASK_IDS_FILE
+              value: /results/ccp/task_ids_officebench.txt
             - name: DISPLAY
               value: ":99"
             - name: PYTHONPATH

@@ -51,11 +51,12 @@ from .appworld_runner import TaskResult
 # Environment
 # ---------------------------------------------------------------------------
 
-APPWORLD_URL           = os.environ.get("APPWORLD_URL",     "http://localhost:8000")
-OFFICEBENCH_URL        = os.environ.get("OFFICEBENCH_URL",  "http://localhost:8001")
-MCP_SERVER_SCRIPT      = str(Path(__file__).parent.parent / "mcp_server.py")
-OB_MCP_SERVER_SCRIPT   = str(Path(__file__).parent.parent / "officebench_mcp_server.py")
-NQ_MCP_SERVER_SCRIPT   = str(Path(__file__).parent.parent / "nq_mcp_server.py")
+APPWORLD_URL              = os.environ.get("APPWORLD_URL",     "http://localhost:8000")
+OFFICEBENCH_URL           = os.environ.get("OFFICEBENCH_URL",  "http://localhost:8001")
+OFFICEBENCH_TASK_IDS_FILE = os.environ.get("OFFICEBENCH_TASK_IDS_FILE", "")
+MCP_SERVER_SCRIPT         = str(Path(__file__).parent.parent / "mcp_server.py")
+OB_MCP_SERVER_SCRIPT      = str(Path(__file__).parent.parent / "officebench_mcp_server.py")
+NQ_MCP_SERVER_SCRIPT      = str(Path(__file__).parent.parent / "nq_mcp_server.py")
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +376,26 @@ class OfficeBenchMCPRunner:
         if self.TASKS_DIR:
             tasks = _load_tasks_from_dir(self.TASKS_DIR, self.split, self.max_tasks)
             if tasks:
-                return tasks
-        return _load_tasks_from_server(client, self.split, self.max_tasks)
+                return self._pin_tasks(tasks)
+        return self._pin_tasks(
+            _load_tasks_from_server(client, self.split, self.max_tasks)
+        )
+
+    def _pin_tasks(self, tasks: List[Any]) -> List[Any]:
+        """Pin task list so all methods run the same tasks across methods."""
+        pin_file = Path(OFFICEBENCH_TASK_IDS_FILE) if OFFICEBENCH_TASK_IDS_FILE else None
+        if pin_file and pin_file.exists():
+            pinned_ids = [l.strip() for l in pin_file.read_text().splitlines() if l.strip()]
+            ordered    = {t.id: t for t in tasks}
+            tasks      = [ordered[tid] for tid in pinned_ids if tid in ordered]
+            print(f"[OfficeBench] Using pinned task IDs from {pin_file}: {len(tasks)} tasks")
+        else:
+            tasks = tasks[: self.max_tasks]
+            if pin_file and tasks:
+                pin_file.parent.mkdir(parents=True, exist_ok=True)
+                pin_file.write_text("\n".join(t.id for t in tasks))
+                print(f"[OfficeBench] Saved {len(tasks)} task IDs → {pin_file}")
+        return tasks
 
     def _init_task(self, task_id: str) -> None:
         """Initialise task environment on the OfficeBench server before MCP session."""
