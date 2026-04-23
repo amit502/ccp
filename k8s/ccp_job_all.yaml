@@ -11,22 +11,40 @@ spec:
         nautilus.io/linstor: "true"
       containers:
         - name: ccp-runner
-          image: python:3.11-slim
+          image: ubuntu:22.04
           env:
             - name: REPO_PATH
               value: /app/ccp
+            - name: OFFICEBENCH_PATH
+              value: /app/officebench
             - name: RESULTS_PATH
               value: /results/ccp
             - name: EXPERIMENT
-              value: all            # runs all baselines on all available benchmarks
+              value: all
             - name: MAX_TASKS
-              value: "50"
+              value: "25"
             - name: MAX_STEPS
-              value: "40"
+              value: "25"
             - name: APPWORLD_URL
               value: http://localhost:8000
+            - name: OFFICEBENCH_URL
+              value: http://localhost:8001
+            - name: OFFICEBENCH_TASKS_DIR
+              value: /app/officebench/tasks
+            - name: OFFICEBENCH_TASK_IDS_FILE
+              value: /results/ccp/task_ids_officebench.txt
             - name: MULTIQA_DATA_FILE
               value: /results/ccp/data/nq-dev-00.jsonl.gz
+            - name: DISPLAY
+              value: ":99"
+            - name: PYTHONPATH
+              value: /app
+            - name: LLM_DEBUG
+              value: "1"
+            - name: TOKEN_THRESHOLD
+              value: "500"
+            - name: GIT_TERMINAL_PROMPT
+              value: "0"
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -38,47 +56,73 @@ spec:
           args:
             - |
               set -e
-              echo "=== CCP Experiment Runner ==="
-              echo "Experiment : ${EXPERIMENT}"
-              echo "Results    : ${RESULTS_PATH}"
-              echo "Tasks      : ${MAX_TASKS}"
-              echo "Started    : $(date)"
+              echo "=== CCP All-Benchmarks Job ==="
+              echo "Started: $(date)"
 
-              # ── 1. System deps ──────────────────────────────────────────
-              apt-get update -qq && apt-get install -y git wget curl -qq
+              # ── 0. Raise inotify / fd limits ────────────────────────────
+              echo 524288 > /proc/sys/fs/inotify/max_user_watches   || true
+              echo 524288 > /proc/sys/fs/inotify/max_user_instances || true
+              ulimit -n 65535 || true
 
-              # ── 2. Clone and install CCP ────────────────────────────────
+              # ── 1. System dependencies ───────────────────────────────────
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq \
+                python3 python3-pip git wget curl \
+                libreoffice \
+                xvfb \
+                libgl1-mesa-glx \
+                libglib2.0-0
+
+              # ── 2. Start virtual display (headless LibreOffice) ──────────
+              Xvfb :99 -screen 0 1024x768x24 -nolisten tcp &
+              XVFB_PID=$!
+              sleep 2
+              echo "Xvfb started on display :99"
+
+              # ── 3. Clone OfficeBench ─────────────────────────────────────
+              git clone https://github.com/zlwang-cs/OfficeBench.git ${OFFICEBENCH_PATH}
+              pip3 install -r ${OFFICEBENCH_PATH}/requirements.txt -q
+
+              # ── 4. Clone and install CCP ─────────────────────────────────
               git clone https://github.com/amit502/ccp.git ${REPO_PATH}
               cd ${REPO_PATH}
-              pip install -e ".[benchmark,dev]" -q
-              pip install matplotlib pandas -q
+              pip3 install -r requirements.txt -q
+              pip3 install -e . --no-deps -q
+              pip3 install flask python-docx openpyxl python-pptx matplotlib pandas -q
 
-              # ── 3. Create results directories ───────────────────────────
-              mkdir -p ${RESULTS_PATH}/data
-              mkdir -p ${RESULTS_PATH}/plots
-              mkdir -p ${RESULTS_PATH}/acon_guidelines
+              # ── 5. Start OfficeBench server ──────────────────────────────
+              OFFICEBENCH_TASKS_DIR=${OFFICEBENCH_TASKS_DIR} \
+                python3 ${REPO_PATH}/officebench_server.py \
+                  --port 8001 \
+                  --tasks-dir ${OFFICEBENCH_TASKS_DIR} &
+              OB_PID=$!
 
-              # ── 4. Download NQ data (Multi-QA benchmark) ────────────────
+              for i in $(seq 1 12); do
+                if curl -sf http://localhost:8001/health > /dev/null 2>&1; then
+                  echo "OfficeBench server ready."
+                  break
+                fi
+                echo "  Waiting for OfficeBench... (${i}/12)"
+                sleep 5
+              done
+
+              # ── 6. Download NQ data (MultiQA) ────────────────────────────
+              mkdir -p ${RESULTS_PATH}/data ${RESULTS_PATH}/acon_guidelines
               if [ ! -f ${MULTIQA_DATA_FILE} ]; then
                 echo "Downloading Natural Questions dev set..."
                 wget -q -O ${MULTIQA_DATA_FILE} \
                   https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
-                echo "NQ data downloaded."
-              else
-                echo "NQ data already exists, skipping download."
               fi
 
-              # ── 5. Download AppWorld data ───────────────────────────────
+              # ── 7. Download AppWorld data and start server ───────────────
               echo "Downloading AppWorld data..."
               appworld download all --data-dir ${RESULTS_PATH}/data/appworld
 
-              # ── 6. Start AppWorld server in background ──────────────────
-              echo "Starting AppWorld server..."
               APPWORLD_DATA_DIR=${RESULTS_PATH}/data/appworld \
                 appworld server start --port 8000 &
               APPWORLD_PID=$!
 
-              # Wait up to 60s for AppWorld to be ready
               for i in $(seq 1 12); do
                 if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
                   echo "AppWorld server ready."
@@ -88,38 +132,41 @@ spec:
                 sleep 5
               done
 
-              # ── 7. Run ACON offline optimization first ──────────────────
-              echo "=== ACON Offline Optimization ==="
+              # ── 8. ACON offline optimization ─────────────────────────────
+              cd /app
+              echo "=== ACON Optimization: AppWorld ==="
               RESULTS_PATH=${RESULTS_PATH} \
-                python -m experiments.run_experiment \
+                python3 -m ccp.experiments.run_experiment \
                   --experiment acon_optimize \
                   --benchmark appworld \
-                  --tasks ${MAX_TASKS}
+                  --tasks ${MAX_TASKS} || echo "[WARN] ACON appworld optimization failed — using defaults"
 
-              # ── 8. Run all experiments ──────────────────────────────────
-              echo "=== Running All Experiments ==="
+              echo "=== ACON Optimization: MultiQA ==="
               RESULTS_PATH=${RESULTS_PATH} \
-                python -m experiments.run_experiment \
+                python3 -m ccp.experiments.run_experiment \
+                  --experiment acon_optimize \
+                  --benchmark multiqa \
+                  --tasks ${MAX_TASKS} || echo "[WARN] ACON multiqa optimization failed — using defaults"
+
+              # ── 9. Run all 6 methods on all 3 benchmarks ─────────────────
+              echo "=== Running All Experiments ==="
+              set +e
+              RESULTS_PATH=${RESULTS_PATH} \
+                python3 -m ccp.experiments.run_experiment \
                   --experiment ${EXPERIMENT} \
                   --tasks ${MAX_TASKS} \
                   --steps ${MAX_STEPS}
+              echo "Experiment exit code: $?"
 
-              # ── 9. Generate all plots ───────────────────────────────────
-              echo "=== Generating Plots ==="
-              python plotting/plot_results.py \
-                --results-dir ${RESULTS_PATH} \
-                --output-dir  ${RESULTS_PATH}/plots \
-                --format pdf --dpi 300
-
-              # ── 10. Cleanup ─────────────────────────────────────────────
+              # ── 10. Cleanup ───────────────────────────────────────────────
               kill ${APPWORLD_PID} 2>/dev/null || true
+              kill ${OB_PID}       2>/dev/null || true
+              kill ${XVFB_PID}     2>/dev/null || true
 
-              echo "=== Job Complete ==="
-              echo "Finished: $(date)"
-              echo "Results:"
-              ls -lh ${RESULTS_PATH}/*.csv 2>/dev/null || echo "  (no CSVs yet)"
-              echo "Plots:"
-              ls -lh ${RESULTS_PATH}/plots/ 2>/dev/null || echo "  (no plots yet)"
+              echo "=== Done: $(date) ==="
+              echo "CSVs saved:"
+              ls -lh ${RESULTS_PATH}/*.csv 2>/dev/null || echo "  none found"
+              exit 0
 
           volumeMounts:
             - name: git-repo
@@ -128,11 +175,11 @@ spec:
               mountPath: /results
           resources:
             requests:
-              memory: 8Gi
+              memory: 24Gi
               cpu: "4"
             limits:
-              memory: 16Gi
-              cpu: "8"
+              memory: 24Gi
+              cpu: "4"
 
       volumes:
         - name: git-repo
@@ -142,4 +189,4 @@ spec:
             claimName: reflexion-data-pvc
 
       restartPolicy: Never
-  backoffLimit: 1
+  backoffLimit: 0

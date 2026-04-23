@@ -131,6 +131,18 @@ _HIGH_PHI_TOOLS = {
     "get_account_id",
     "set_config",
     "initialize",
+    # AppWorld supervisor — task spec and credentials must survive full trajectory
+    "show_active_task",
+    "show_account_passwords",
+    "show_profile",
+    "active_task_get",
+    "account_passwords_get",
+    "profile_get",
+    # OfficeBench open-file tools — the returned handle (doc_id/workbook_id)
+    # is no longer value-tracked (hex filter), so must be anchored explicitly
+    "open_workbook",
+    "open_document",
+    "open_presentation",
 }
 
 # Tools whose outputs are typically ephemeral / informational

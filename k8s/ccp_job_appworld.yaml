@@ -19,14 +19,16 @@ spec:
               value: /results/ccp
             - name: APPWORLD_ROOT
               value: /results/ccp/data/appworld
-            # appworld_all    = run all 7 methods (full benchmark table)
+            # appworld_all    = run all 6 methods (full benchmark table)
             # appworld_ccp_v2 = run only ccp_v2
             - name: EXPERIMENT
               value: appworld_all
             - name: MAX_TASKS
               value: "25"
             - name: MAX_STEPS
-              value: "40"
+              value: "25"
+            - name: TASK_TIMEOUT_SECS
+              value: "300"
             - name: APPWORLD_URL
               value: http://localhost:8000
             - name: APPWORLD_VENV
@@ -37,11 +39,8 @@ spec:
               value: "1"
             - name: TOKEN_THRESHOLD
               value: "500"
-            # CCP: retain ≥65% of elements after φ-scoring.
-            # threshold=500 + retention=0.65 gave CCP=16% (tied best) with CsRecall=0.65.
-            # Lower threshold compounded causal loss — do not go below 500.
-            - name: RETENTION_RATIO
-              value: "0.65"
+            - name: GIT_TERMINAL_PROMPT
+              value: "0"
             # Pinned task list — written on first run, reused on all subsequent runs
             # so every method (including separate per-method jobs) runs the same tasks.
             # File name encodes the benchmark for easy identification on the PVC.
@@ -149,7 +148,7 @@ spec:
               || echo "[WARN] ACON optimization failed — continuing without guidelines"
 
               # ── 9. Run all methods on AppWorld ──────────────────────────
-              echo "=== Running AppWorld: all 7 methods ==="
+              echo "=== Running AppWorld: all 6 methods ==="
               RESULTS_PATH=${RESULTS_PATH} \
                 python3 -m ccp.experiments.run_experiment \
                   --experiment ${EXPERIMENT} \

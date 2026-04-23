@@ -87,8 +87,8 @@ spec:
                   --tasks ${MAX_TASKS} \
               || echo "[WARN] ACON optimization failed — continuing without guidelines"
 
-              # ── 6. Run all 7 methods on Multi-QA ────────────────────────
-              echo "=== Running Multi-QA: all 7 methods ==="
+              # ── 6. Run all 6 methods on Multi-QA ────────────────────────
+              echo "=== Running Multi-QA: all 6 methods ==="
               RESULTS_PATH=${RESULTS_PATH} \
                 python3 -m ccp.experiments.run_experiment \
                   --experiment ${EXPERIMENT} \

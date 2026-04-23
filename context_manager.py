@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from .causal_scorer import ValueRegistry
+from .causal_scorer import ValueRegistry, _heuristic_phi
 from .models import AgentContext, CCPStats, CompressionTier, ContextElement
 
 
@@ -175,7 +175,11 @@ class CCPContextManager:
         tokens_before = self._context.total_tokens()
 
         recent_steps  = {e.step for e in elements[-self.recent_window:]}
-        live_set      = self._live_ancestors(recent_steps)
+
+        # Always-live seeds: high-phi tool steps (task-spec, auth, credentials)
+        # survive the full trajectory regardless of exact string matching.
+        anchor_steps  = {e.step for e in elements if (_heuristic_phi(e) or 0) >= 0.9}
+        live_set      = self._live_ancestors(recent_steps | anchor_steps)
 
         kept: List[ContextElement] = []
         n_active = n_inert = 0
