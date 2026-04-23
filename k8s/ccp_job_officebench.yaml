@@ -120,8 +120,8 @@ spec:
               # are incompatible with ACON's task-agnostic offline optimizer.
               # ACON will run on OfficeBench without pre-trained guidelines.
 
-              # ── 8. Run all 7 methods on OfficeBench ─────────────────────
-              echo "=== Running OfficeBench: all 7 methods ==="
+              # ── 8. Run all 6 methods on OfficeBench ─────────────────────
+              echo "=== Running OfficeBench: all 6 methods ==="
               RESULTS_PATH=${RESULTS_PATH} \
                 python3 -m ccp.experiments.run_experiment \
                   --experiment ${EXPERIMENT} \

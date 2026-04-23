@@ -360,7 +360,8 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
         entry = _open_wbs.get(_p(params, "workbook_id", "wb_id", "id"))
         if not entry:
             return {"observation": "Workbook not open", "status": "error"}
-        ws = entry["wb"][params.get("sheet", entry["wb"].active.title)]
+        sheet_name = _p(params, "sheet", "sheet_name", "worksheet", default=None)
+        ws = entry["wb"][sheet_name] if sheet_name else entry["wb"].active
         val = ws[params.get("cell", "A1")].value
         return {"observation": str(val), "value": val, "status": "ok"}
 
@@ -368,15 +369,28 @@ def _exec_excel(state: Dict, action: str, params: Dict) -> Dict:
         entry = _open_wbs.get(_p(params, "workbook_id", "wb_id", "id"))
         if not entry:
             return {"observation": "Workbook not open", "status": "error"}
-        ws = entry["wb"][params.get("sheet", entry["wb"].active.title)]
-        data = [[c.value for c in row] for row in ws[params.get("range", "A1:B5")]]
-        return {"observation": json.dumps(data), "data": data, "status": "ok"}
+        sheet_name = _p(params, "sheet", "sheet_name", "worksheet", default=None)
+        ws = entry["wb"][sheet_name] if sheet_name else entry["wb"].active
+        raw = ws[params.get("range", "A1:B5")]
+        # openpyxl returns Cell for single cell, tuple-of-cells for column range,
+        # tuple-of-row-tuples for rectangular range — normalise all to list-of-lists
+        if hasattr(raw, "value"):
+            data = [[raw.value]]
+        else:
+            data = []
+            for item in raw:
+                if hasattr(item, "value"):
+                    data.append([item.value])
+                else:
+                    data.append([c.value for c in item])
+        return {"observation": json.dumps(data, default=str), "data": data, "status": "ok"}
 
     if action in ("write_cell", "apply_formula"):
         entry = _open_wbs.get(_p(params, "workbook_id", "wb_id", "id"))
         if not entry:
             return {"observation": "Workbook not open", "status": "error"}
-        ws = entry["wb"][params.get("sheet", entry["wb"].active.title)]
+        sheet_name = _p(params, "sheet", "sheet_name", "worksheet", default=None)
+        ws = entry["wb"][sheet_name] if sheet_name else entry["wb"].active
         cell  = params.get("cell", "A1")
         value = params.get("value") or params.get("formula")
         ws[cell] = value

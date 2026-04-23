@@ -449,7 +449,8 @@ Goal: {state["goal"]}"""
                 "gathered", "noted", "understood",
             ])
             # Block finish if: too early, or no real action, or supervisor message not sent
-            if (trivial and state["step"] <= 5) or read_only_finish:
+            # These supervisor-injection blocks only apply to AppWorld (has_supervisor=True)
+            if has_supervisor and ((trivial and state["step"] <= 5) or read_only_finish):
                 print(f"  [agent] premature finish blocked at step {state['step']}: {answer[:80]!r}", flush=True)
                 print(f"  [agent] action_tools_called={action_tools_called}", flush=True)
                 tool_calls = [{
@@ -458,7 +459,7 @@ Goal: {state["goal"]}"""
                     "id":   f"call_{state['step']}_retry",
                     "type": "tool_call",
                 }]
-            elif not supervisor_message_called and action_tools_called and _sv_msg_tool:
+            elif has_supervisor and not supervisor_message_called and action_tools_called and _sv_msg_tool:
                 # Agent completed action but forgot to call supervisor message — force it
                 print(f"  [agent] finish blocked — supervisor message not called; forcing it", flush=True)
                 tool_calls = [{

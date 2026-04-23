@@ -61,7 +61,14 @@ class ValueRegistry:
     _STOP: FrozenSet[str] = frozenset({
         "true", "false", "null", "none", "ok", "error", "success",
         "failed", "pending", "200", "201", "400", "401", "403", "404", "500",
+        # JSON response envelope keys — present in every tool output, not content
+        "observation", "status", "state_changed", "data", "files", "value",
+        "workbook_id", "doc_id", "pptx_id", "wb_id", "document_id",
     })
+
+    # Resource handle detector: hex string containing at least one a-f letter.
+    # Matches UUIDs/doc-ids like "bb5b2771" but NOT pure decimal numbers like "50000".
+    _HANDLE_RE: re.Pattern = re.compile(r'^[0-9a-f]{4,16}$', re.IGNORECASE)
 
     def __init__(self) -> None:
         self._outputs:    Dict[int, FrozenSet[str]] = {}   # step → values
@@ -77,7 +84,11 @@ class ValueRegistry:
             values.update(re.findall(pat, text))
         self._outputs[step] = frozenset(
             v for v in values
-            if len(v) >= 3 and v.lower() not in self._STOP
+            if len(v) >= 3
+            and v.lower() not in self._STOP
+            # Exclude hex handles (UUID fragments like "bb5b2771") but keep
+            # pure decimal numbers (like cell values "50000") — require ≥1 a-f letter.
+            and not (self._HANDLE_RE.match(v) and any(c in 'abcdefABCDEF' for c in v))
         )
 
     def register_input(self, current_step: int, input_text: str) -> None:
