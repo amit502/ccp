@@ -109,13 +109,14 @@ class GenericToolCallInterceptor:
 # ---------------------------------------------------------------------------
 
 class MCPAgentState(TypedDict):
-    messages:     List[Any]
-    goal:         str
-    step:         int
-    max_steps:    int
-    done:         bool
-    final_answer: Optional[str]
-    access_tokens: dict  # stored auth tokens per app
+    messages:      List[Any]
+    goal:          str
+    step:          int
+    max_steps:     int
+    done:          bool
+    final_answer:  Optional[str]
+    access_tokens: dict   # stored auth tokens per app
+    ctx_compressed: dict  # step→content (None=pruned) injected by mcp_runner
 
 
 _SYSTEM_PROMPT = """\
@@ -269,6 +270,11 @@ Goal: {state["goal"]}"""
     # This is what the reasoning model needs to track conversation state
     llm_messages = [{"role": "system", "content": system_text}]
 
+    # ctx_compressed: step→content (None = pruned by manager). 1-indexed by tool call order.
+    # Built by tracking_add in mcp_runner so each _agent_node call sees latest compression.
+    cmap = state.get("ctx_compressed") or {}
+    _tm_idx = 0  # counts ToolMessages seen; maps to manager step (1-indexed)
+
     if not state["messages"]:
         llm_messages.append({"role": "user", "content": "Begin. Call the first tool now."})
     else:
@@ -310,9 +316,22 @@ Goal: {state["goal"]}"""
                     content = "\n".join(parts)
                 else:
                     content = str(raw_content)
-                content = content[:2000]
+
+                # Apply manager's compression decision for this step.
+                # _tm_idx is the 1-indexed ordinal of this ToolMessage = manager step.
+                _tm_idx += 1
+                step_n = _tm_idx
+                if step_n in cmap:
+                    cv = cmap[step_n]
+                    if cv is None:
+                        content = "[omitted]"  # pruned by CCP/FIFO
+                    else:
+                        content = cv[:2000]    # compacted by CCP
+                else:
+                    content = content[:2000]   # not yet compressed — use original
+
                 if content:
-                    print(f"  [tool result] {content[:150]}", flush=True)
+                    print(f"  [tool result s={step_n}] {content[:150]}", flush=True)
                     # Store access tokens found in results so agent can reference them
                     import re as _re
                     tokens = _re.findall(r'eyJ[A-Za-z0-9_-]+[.][A-Za-z0-9_-]+[.][A-Za-z0-9_-]+', content)
@@ -697,12 +716,23 @@ def _resolve_tool_with_embedded_id(
 
 
 async def run_agent_with_tools(
-    goal: str, tools: List[Any], max_steps: int,
+    goal: str,
+    tools: List[Any],
+    max_steps: int,
+    compressed_map: dict = None,
+    manager: Any = None,
 ) -> Dict[str, Any]:
     """
     Run agent with pre-built tools.
     Uses a custom tool executor instead of ToolNode to avoid
     ToolNode starting a fresh MCP subprocess per call.
+
+    compressed_map: shared dict {step→content | None} populated by tracking_add
+                    in mcp_runner. _agent_node reads it each turn to replace
+                    ToolMessage content with manager-compressed/pruned versions,
+                    making compression actually reach the LLM.
+    manager:        the context manager for this task. Used to register error
+                    tool calls so step counts stay aligned with ToolMessages.
     """
     venmo_tools = [t.name for t in tools if "venmo" in t.name.lower()]
     print(f"  [tools] total={len(tools)} venmo={venmo_tools[:5]}", flush=True)
@@ -770,6 +800,13 @@ async def run_agent_with_tools(
                         content = json.dumps(raw_result)
                 except Exception as e:
                     content = f"Tool error: {e}"
+                    # Interceptor didn't run — register with manager so step counts
+                    # stay aligned with ToolMessages in state["messages"].
+                    if manager is not None:
+                        try:
+                            manager.add_observation(name, args or {}, content, status="error")
+                        except Exception:
+                            pass
             _args_str = ", ".join(
                 f"{k}={str(v)[:40]!r}" for k, v in args.items() if k != "access_token"
             )
@@ -786,6 +823,7 @@ async def run_agent_with_tools(
     state = {
         "messages": [], "goal": goal, "step": 0,
         "max_steps": max_steps, "done": False, "final_answer": None, "access_tokens": {},
+        "ctx_compressed": compressed_map if compressed_map is not None else {},
     }
 
     # Retry guard: track (tool_name, error_fingerprint) → consecutive_count

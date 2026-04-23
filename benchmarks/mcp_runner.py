@@ -85,6 +85,7 @@ async def _run_one_task(
             interceptor.set_manager(manager)
             final_state = await run_agent_with_tools(
                 goal=goal, tools=cached_tools, max_steps=max_steps,
+                manager=manager,
             )
             interceptor.set_manager(None)
         else:
@@ -161,7 +162,13 @@ async def _run_all_tasks_async(
         t0 = time.time()
         peak_tokens_seen = [0]  # track max tokens via mutable list
 
-        # Wrap manager to track peak tokens after each compression event
+        # Shared dict: manager step (1-indexed) → compressed content str, or None if pruned.
+        # tracking_add updates it after every add_observation; _agent_node reads it each
+        # turn to inject compressed/pruned content into the LLM's message history so
+        # compression actually reaches the LLM (not just the manager's internal tracking).
+        compressed_map: dict = {}
+
+        # Wrap manager to track peak tokens AND populate compressed_map
         original_add = manager.add_observation
         _mgr = manager
         def tracking_add(*args, **kwargs):
@@ -172,6 +179,16 @@ async def _run_all_tasks_async(
             print(f"  [mgr] toks={toks} threshold={_mgr.token_threshold} stats={len(stats)}", flush=True)
             if toks > peak_tokens_seen[0]:
                 peak_tokens_seen[0] = toks
+            # Mark pruned steps (dropped by FIFO/CCP dead-branch elimination)
+            ctx_step_set = {e.step for e in ctx_now.elements}
+            current_step = getattr(_mgr, '_step', 0)
+            for step in range(1, current_step + 1):
+                if step not in ctx_step_set:
+                    compressed_map.setdefault(step, None)
+            # Mark compacted steps (CCP ancestor compaction)
+            for e in ctx_now.elements:
+                if e.compressed_output is not None:
+                    compressed_map[e.step] = e.compressed_output
             return elem
         manager.add_observation = tracking_add
 
@@ -183,6 +200,8 @@ async def _run_all_tasks_async(
                     goal=task.goal,
                     tools=tools,
                     max_steps=max_steps,
+                    compressed_map=compressed_map,
+                    manager=manager,
                 ),
                 timeout=_timeout,
             )
