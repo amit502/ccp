@@ -33,8 +33,6 @@ spec:
               value: /app/officebench/tasks
             - name: OFFICEBENCH_TASK_IDS_FILE
               value: /results/ccp/task_ids_officebench.txt
-            - name: MULTIQA_DATA_FILE
-              value: /results/ccp/data/nq-dev-00.jsonl.gz
             - name: DISPLAY
               value: ":99"
             - name: PYTHONPATH
@@ -89,7 +87,7 @@ spec:
               cd ${REPO_PATH}
               pip3 install -r requirements.txt -q
               pip3 install -e . --no-deps -q
-              pip3 install flask python-docx openpyxl python-pptx matplotlib pandas -q
+              pip3 install flask python-docx openpyxl python-pptx matplotlib pandas datasets -q
 
               # ── 5. Start OfficeBench server ──────────────────────────────
               OFFICEBENCH_TASKS_DIR=${OFFICEBENCH_TASKS_DIR} \
@@ -107,13 +105,8 @@ spec:
                 sleep 5
               done
 
-              # ── 6. Download NQ data (MultiQA) ────────────────────────────
-              mkdir -p ${RESULTS_PATH}/data ${RESULTS_PATH}/acon_guidelines
-              if [ ! -f ${MULTIQA_DATA_FILE} ]; then
-                echo "Downloading Natural Questions dev set..."
-                wget -q -O ${MULTIQA_DATA_FILE} \
-                  https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
-              fi
+              # ── 6. NQ data loaded by runner via HuggingFace (no pre-download needed)
+              mkdir -p ${RESULTS_PATH}/acon_guidelines
 
               # ── 7. Download AppWorld data and start server ───────────────
               echo "Downloading AppWorld data..."

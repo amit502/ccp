@@ -23,9 +23,6 @@ spec:
               value: "25"
             - name: MAX_STEPS
               value: "20"
-            # NQ data persisted on PVC — downloaded once, reused across runs
-            - name: MULTIQA_DATA_FILE
-              value: /results/ccp/data/nq-dev-00.jsonl.gz
             - name: PYTHONPATH
               value: /app
             - name: LLM_DEBUG
@@ -58,20 +55,10 @@ spec:
               cd ${REPO_PATH}
               pip3 install -r requirements.txt -q
               pip3 install -e . --no-deps -q
+              pip3 install datasets -q
 
               # ── 3. Create results directories ───────────────────────────
-              mkdir -p ${RESULTS_PATH}/data
               mkdir -p ${RESULTS_PATH}/acon_guidelines
-
-              # ── 4. Download Natural Questions data (skip if on PVC) ─────
-              if [ ! -f "${MULTIQA_DATA_FILE}" ]; then
-                echo "Downloading Natural Questions dev set..."
-                wget -q -O ${MULTIQA_DATA_FILE} \
-                  https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
-                echo "NQ data downloaded: $(du -h ${MULTIQA_DATA_FILE} | cut -f1)"
-              else
-                echo "NQ data found at ${MULTIQA_DATA_FILE} — skipping download."
-              fi
 
               # Run experiments from /app so ccp is a proper package
               # Disable set -e so Python experiment errors don't kill the job.
