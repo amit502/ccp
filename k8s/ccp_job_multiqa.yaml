@@ -23,6 +23,13 @@ spec:
               value: "25"
             - name: MAX_STEPS
               value: "20"
+            - name: HF_DATASETS_CACHE
+              value: /results/ccp/hf_cache
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: token
             - name: PYTHONPATH
               value: /app
             - name: LLM_DEBUG
@@ -58,7 +65,7 @@ spec:
               pip3 install datasets -q
 
               # ── 3. Create results directories ───────────────────────────
-              mkdir -p ${RESULTS_PATH}/acon_guidelines
+              mkdir -p ${RESULTS_PATH}/acon_guidelines ${HF_DATASETS_CACHE}
 
               # Run experiments from /app so ccp is a proper package
               # Disable set -e so Python experiment errors don't kill the job.
