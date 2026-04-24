@@ -525,6 +525,11 @@ class MultiObjQAMCPRunner:
         from ..benchmarks.multiobjqa_runner import _load_nq_tasks, _score_moqa_answer
         self._tasks        = _load_nq_tasks(max_tasks=max_tasks, hops=n_hops)
         self._score_answer = _score_moqa_answer
+        # Cached tools/interceptor — None means _run_one_task builds a fresh client.
+        # AppWorldMCPRunner pre-fetches these; MultiQA doesn't need to since the
+        # NQ MCP server is lightweight (no OpenAPI spec to fetch).
+        self._tools       = None
+        self._interceptor = None
         print(f"[MultiObjQA/MCP] {len(self._tasks)} tasks loaded ({n_hops} hops each)")
 
     def _server_configs(self) -> Dict[str, Any]:
