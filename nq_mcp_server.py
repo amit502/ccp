@@ -88,7 +88,15 @@ def _load_hf_kb(max_items: int = 5000) -> Dict[str, str]:
             ans_list = item.get("annotations", {}).get("short_answers", [[]])
             ans = ""
             if ans_list and ans_list[0]:
-                ans = ans_list[0][0] if isinstance(ans_list[0], list) else str(ans_list[0])
+                first = ans_list[0]
+                if isinstance(first, list):
+                    ans = first[0] if first else ""
+                elif isinstance(first, dict):
+                    # HF NQ format: {"start_token": [...], "text": ["George Washington"]}
+                    texts = first.get("text", [])
+                    ans = texts[0] if texts else ""
+                else:
+                    ans = str(first)
             if q and ans:
                 kb[_normalise(q)] = str(ans)
             if len(kb) >= max_items:

@@ -361,7 +361,7 @@ def run_ablation_online(max_tasks: int, verbose: bool):
         save_results(all_metrics, "ablation_a4_online.csv")
 
 
-def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: bool):
+def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: bool, max_steps: int = 20):
     """
     Run ACON offline optimization on the TRAIN split.
     Saves guidelines to RESULTS_PATH/acon_guidelines/<benchmark>.json.
@@ -382,10 +382,10 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
 
     # Select the correct train runner for the benchmark
     if benchmark == "multiqa":
-        train_runner = _make_multiqa_runner(max_tasks=max_tasks, max_steps=20)
+        train_runner = _make_multiqa_runner(max_tasks=max_tasks, max_steps=max_steps)
     else:
         # AppWorld: use TRAIN split so test tasks remain unseen during optimization
-        train_runner = _make_appworld_runner(max_tasks=max_tasks, max_steps=30, split="train")
+        train_runner = _make_appworld_runner(max_tasks=max_tasks, max_steps=max_steps, split="train")
 
     if train_runner is None:
         return
@@ -412,7 +412,7 @@ def run_acon_optimize(max_tasks: int, n_iters: int, benchmark: str, verbose: boo
             goal=task.goal,
             manager=manager,
             server_configs=train_runner._server_configs(),
-            max_steps=30,
+            max_steps=max_steps,
             score_fn=lambda _, fs: 1.0 if fs.get("done") else 0.0,
             verbose=True,
             cached_tools=train_runner._tools,
@@ -502,6 +502,6 @@ if __name__ == "__main__":
         run_ablation_online(args.tasks, args.verbose)
 
     elif exp == "acon_optimize":
-        run_acon_optimize(args.tasks, args.acon_iters, args.benchmark, args.verbose)
+        run_acon_optimize(args.tasks, args.acon_iters, args.benchmark, args.verbose, max_steps=args.steps)
 
     print(f"\nDone. Results in: {RESULTS_DIR}")

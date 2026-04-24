@@ -61,6 +61,17 @@ def _compact(element: ContextElement, referenced_values: set) -> str:
                     kept[k] = v
             if kept:
                 return json.dumps(kept)
+            # No ID/token fields — look for a "results"/"items" list containing
+            # an answer/snippet field (search-result format from NQ MCP server).
+            for list_key in ("results", "items", "data"):
+                results_list = data.get(list_key)
+                if isinstance(results_list, list) and results_list:
+                    first = results_list[0]
+                    if isinstance(first, dict):
+                        for ans_key in ("answer", "snippet", "result", "text", "value"):
+                            if first.get(ans_key):
+                                return json.dumps({ans_key: str(first[ans_key])[:150]})
+                    break
         elif isinstance(data, list) and data:
             # Keep items that contain at least one referenced value
             hits = [it for it in data if any(str(v) in str(it) for v in referenced_values)]

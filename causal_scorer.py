@@ -143,12 +143,17 @@ _HIGH_PHI_TOOLS = {
     "open_workbook",
     "open_document",
     "open_presentation",
+    # MultiQA retrieval tools — answers must survive the full trajectory so the
+    # agent can include them all in its final FINAL ANSWER response.
+    # These exact names are unique to the NQ MCP server (no __ prefix).
+    "search",
+    "lookup_fact",
+    "web_search",
 }
 
 # Tools whose outputs are typically ephemeral / informational
 _LOW_PHI_TOOLS = {
     "list_items",
-    "search",
     "browse",
     "get_recommendations",
     "get_trending",

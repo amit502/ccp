@@ -22,7 +22,9 @@ spec:
             - name: MAX_TASKS
               value: "5"
             - name: MAX_STEPS
-              value: "20"
+              value: "6"
+            - name: TASK_TIMEOUT_SECS
+              value: "450"
             - name: HF_DATASETS_CACHE
               value: /results/ccp/hf_cache
             - name: HUGGING_FACE_HUB_TOKEN
@@ -37,7 +39,9 @@ spec:
             - name: TOKEN_THRESHOLD
               value: "500"
             - name: MULTIQA_TOKEN_THRESHOLD
-              value: "1500"
+              value: "100"
+            - name: ACON_OPT_ITERS
+              value: "1"
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             - name: OPENAI_API_KEY
@@ -81,6 +85,7 @@ spec:
                   --experiment acon_optimize \
                   --benchmark multiqa \
                   --tasks ${MAX_TASKS} \
+                  --steps ${MAX_STEPS} \
               || echo "[WARN] ACON optimization failed — continuing without guidelines"
 
               # ── 6. Run all 6 methods on Multi-QA ────────────────────────

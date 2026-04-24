@@ -388,33 +388,48 @@ Goal: {state["goal"]}"""
         if not isinstance(raw, str):
             raw = ""
 
-        # Reasoning model — do follow-up to get actual JSON action
+        # Reasoning model — try to extract answer directly before a follow-up call
         if raw.startswith(_REASONING_SENTINEL):
             reasoning = raw[len(_REASONING_SENTINEL):]
-            step_warning = " Output ONLY a JSON object — no thinking, no text." if state["step"] <= 1 else ""
-            follow_msgs = formatted + [
-                {"role": "assistant", "content": f"<thinking>{reasoning}</thinking>"},
-                {"role": "user", "content":
-                    f"Output ONLY the JSON action now — no thinking tags, no explanation.{step_warning}"},
-            ]
-            raw = await asyncio.get_event_loop().run_in_executor(
-                None, _llm_raw, follow_msgs, 0.0
-            )
-            if not isinstance(raw, str):
-                raw = ""
-            # If follow-up ALSO returned reasoning, do one more attempt with stronger instruction
+            # Fast path: extract FINAL ANSWER directly from reasoning
+            if "FINAL ANSWER:" in reasoning:
+                raw = "FINAL ANSWER:" + reasoning.split("FINAL ANSWER:", 1)[1].strip()
+                print(f"  [LLM] extracted FINAL ANSWER from reasoning (no follow-up)", flush=True)
+            else:
+                # Fast path: extract embedded JSON tool call from reasoning
+                _jm = re.search(
+                    r'\{[^{}]{0,600}"(?:action|tool|function|name)"[^{}]{0,600}\}',
+                    reasoning, re.DOTALL
+                )
+                if _jm:
+                    raw = _jm.group(0)
+                    print(f"  [LLM] extracted JSON from reasoning (no follow-up): {raw[:80]!r}", flush=True)
+            # Still need a follow-up call
             if raw.startswith(_REASONING_SENTINEL):
-                reasoning2 = raw[len(_REASONING_SENTINEL):]
-                final_msgs = follow_msgs + [
-                    {"role": "assistant", "content": f"<thinking>{reasoning2}</thinking>"},
+                step_warning = " Output ONLY a JSON object — no thinking, no text." if state["step"] <= 1 else ""
+                follow_msgs = formatted + [
+                    {"role": "assistant", "content": f"<thinking>{reasoning}</thinking>"},
                     {"role": "user", "content":
-                        "JSON only. Start your response with { and end with }."},
+                        f"Output ONLY the JSON action now — no thinking tags, no explanation.{step_warning}"},
                 ]
                 raw = await asyncio.get_event_loop().run_in_executor(
-                    None, _llm_raw, final_msgs, 0.0
+                    None, _llm_raw, follow_msgs, 0.0
                 )
-                if not isinstance(raw, str) or raw.startswith(_REASONING_SENTINEL):
+                if not isinstance(raw, str):
                     raw = ""
+                # If follow-up ALSO returned reasoning, do one more attempt with stronger instruction
+                if raw.startswith(_REASONING_SENTINEL):
+                    reasoning2 = raw[len(_REASONING_SENTINEL):]
+                    final_msgs = follow_msgs + [
+                        {"role": "assistant", "content": f"<thinking>{reasoning2}</thinking>"},
+                        {"role": "user", "content":
+                            "JSON only. Start your response with { and end with }."},
+                    ]
+                    raw = await asyncio.get_event_loop().run_in_executor(
+                        None, _llm_raw, final_msgs, 0.0
+                    )
+                    if not isinstance(raw, str) or raw.startswith(_REASONING_SENTINEL):
+                        raw = ""
     except Exception as e:
         import traceback
         print(f"  [LLM] error: {type(e).__name__}: {e}", flush=True)

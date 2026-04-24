@@ -118,7 +118,14 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
                     sa_list = ann.get("short_answers", [])
                     if sa_list and sa_list[0]:
                         first = sa_list[0]
-                        ans = first[0] if isinstance(first, list) else str(first)
+                        if isinstance(first, list):
+                            ans = first[0] if first else ""
+                        elif isinstance(first, dict):
+                            # HF NQ format: {"start_token": [...], "text": ["answer"]}
+                            texts = first.get("text", [])
+                            ans = texts[0] if texts else ""
+                        else:
+                            ans = str(first) if first else ""
                 except Exception:
                     pass
                 qa_pairs.append((q.strip(), ans))
