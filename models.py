@@ -61,9 +61,11 @@ class ContextElement:
         return self.tool_output
 
     def token_count(self) -> int:
-        """Rough token estimate (4 chars ≈ 1 token)."""
-        text = self.action_str() + self.observation_str()
-        return max(1, len(text) // 4)
+        """Rough token estimate (4 chars ≈ 1 token).
+        Observation capped at 2000 chars — what the LLM actually sees per ToolMessage.
+        """
+        obs = self.observation_str()[:2000]
+        return max(1, len(self.action_str() + obs) // 4)
 
     def to_context_block(self) -> str:
         """Format for injection into the agent's context window."""

@@ -24,7 +24,7 @@ spec:
             - name: EXPERIMENT
               value: appworld_all
             - name: MAX_TASKS
-              value: "25"
+              value: "5"
             - name: MAX_STEPS
               value: "25"
             - name: TASK_TIMEOUT_SECS
@@ -39,6 +39,8 @@ spec:
               value: "1"
             - name: TOKEN_THRESHOLD
               value: "500"
+            - name: APPWORLD_TOKEN_THRESHOLD
+              value: "1500"
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             # Pinned task list — written on first run, reused on all subsequent runs

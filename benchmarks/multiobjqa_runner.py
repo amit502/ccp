@@ -91,48 +91,61 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
     """
     from types import SimpleNamespace
 
-    questions = []
+    # qa_pairs: list of (question, answer_or_empty_string)
+    qa_pairs: List[tuple] = []
 
     # --- Priority 1: local file ---
     local_path = os.environ.get("MULTIQA_DATA_FILE", "")
     if local_path and Path(local_path).exists():
-        questions = _load_nq_from_file(local_path, max_tasks * hops)
+        qa_pairs = _load_nq_qa_from_file(local_path, max_tasks * hops)
 
     # --- Priority 2: HuggingFace Hub ---
-    if not questions and HF_AVAILABLE:
+    if not qa_pairs and HF_AVAILABLE:
         try:
-            # google-research-datasets/natural_questions is the canonical HF version
             ds = load_dataset(
                 "google-research-datasets/natural_questions",
                 split="validation",
                 streaming=True,
             )
             for item in ds:
-                # NQ schema: item["question"]["text"] or item["question"]
                 q = (item.get("question") or {}).get("text") or item.get("question", "")
-                if isinstance(q, str) and q.strip():
-                    questions.append(q.strip())
-                if len(questions) >= max_tasks * hops:
+                if not (isinstance(q, str) and q.strip()):
+                    continue
+                # Try to extract short answer — NQ HF schema varies by version
+                ans = ""
+                try:
+                    ann = (item.get("annotations") or {})
+                    sa_list = ann.get("short_answers", [])
+                    if sa_list and sa_list[0]:
+                        first = sa_list[0]
+                        ans = first[0] if isinstance(first, list) else str(first)
+                except Exception:
+                    pass
+                qa_pairs.append((q.strip(), ans))
+                if len(qa_pairs) >= max_tasks * hops:
                     break
-            if questions:
-                print(f"[MultiObjQA] Loaded {len(questions)} questions from HuggingFace NQ.")
+            if qa_pairs:
+                print(f"[MultiObjQA] Loaded {len(qa_pairs)} QA pairs from HuggingFace NQ.")
         except Exception as e:
             print(f"[MultiObjQA] HuggingFace load failed: {e}")
 
     # --- Priority 3: built-in mock ---
-    if not questions:
+    if not qa_pairs:
         print("[MultiObjQA] Using built-in question bank (no external data needed).")
         return _mock_tasks(max_tasks)
 
     # Group into multi-hop compound tasks
     tasks = []
-    for i in range(0, len(questions) - hops + 1, hops):
-        group = questions[i: i + hops]
-        goal  = _build_multihop_goal(group)
+    for i in range(0, len(qa_pairs) - hops + 1, hops):
+        group   = qa_pairs[i: i + hops]
+        qlist   = [q for q, _ in group]
+        alist   = [a for _, a in group]  # may be "" for items without short answers
+        goal    = _build_multihop_goal(qlist)
         tasks.append(SimpleNamespace(
             id=f"moqa_{i // hops:04d}",
             goal=goal,
-            questions=group,
+            questions=qlist,
+            answers=alist,   # store expected answers alongside questions
         ))
         if len(tasks) >= max_tasks:
             break
@@ -141,8 +154,13 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
 
 
 def _load_nq_from_file(path: str, max_questions: int) -> List[str]:
+    """Load questions only (backwards compat). Delegates to _load_nq_qa_from_file."""
+    return [q for q, _ in _load_nq_qa_from_file(path, max_questions)]
+
+
+def _load_nq_qa_from_file(path: str, max_items: int) -> List[tuple]:
     """
-    Load questions from a local NQ JSONL or JSONL.GZ file.
+    Load (question, answer) pairs from a local NQ JSONL or JSONL.GZ file.
 
     NQ dev set format (each line is a JSON object):
     {"question_text": "who sang ...", "annotations": [...], ...}
@@ -152,7 +170,7 @@ def _load_nq_from_file(path: str, max_questions: int) -> List[str]:
     """
     import gzip
 
-    questions = []
+    pairs = []
     opener = gzip.open if path.endswith(".gz") else open
 
     try:
@@ -160,19 +178,33 @@ def _load_nq_from_file(path: str, max_questions: int) -> List[str]:
             for line in f:
                 try:
                     item = json.loads(line)
-                    # NQ field name varies by version
                     q = item.get("question_text") or item.get("question", "")
-                    if q:
-                        questions.append(q.strip())
-                    if len(questions) >= max_questions:
+                    if not q:
+                        continue
+                    # Extract first short answer from NQ annotations
+                    ans = ""
+                    for ann in item.get("annotations", []):
+                        sa = ann.get("short_answers", [])
+                        if sa:
+                            start  = sa[0].get("start_token", 0)
+                            end    = sa[0].get("end_token", 0)
+                            tokens = item.get("document", {}).get("tokens", [])
+                            if tokens and end > start:
+                                ans = " ".join(
+                                    t["token"] for t in tokens[start:end]
+                                    if not t.get("is_html", False)
+                                )
+                            break
+                    pairs.append((q.strip(), ans))
+                    if len(pairs) >= max_items:
                         break
                 except json.JSONDecodeError:
                     continue
-        print(f"[MultiObjQA] Loaded {len(questions)} questions from {path}")
+        print(f"[MultiObjQA] Loaded {len(pairs)} QA pairs from {path}")
     except Exception as e:
         print(f"[MultiObjQA] File load error ({path}): {e}")
 
-    return questions
+    return pairs
 
 
 def _mock_tasks(max_tasks: int) -> List[Any]:
@@ -206,10 +238,25 @@ def _mock_tasks(max_tasks: int) -> List[Any]:
         ],
     ]
 
+    # Pre-computed answers matching the mock KB
+    mock_answers = [
+        ["George Washington", "1889", "Canberra"],
+        ["George Orwell", "Au", "Germany (Johannes Gutenberg)"],
+        ["Jupiter", "Leonardo da Vinci", "1945"],
+        ["299,792 km/s", "Alexander Fleming (1928)", "The Nile River"],
+        ["Japanese Yen (JPY)", "206", "Vatican City"],
+    ]
+
     tasks = []
-    for i, qs in enumerate(mock_questions * (max_tasks // len(mock_questions) + 1)):
+    for i, (qs, ans) in enumerate(
+        zip(
+            mock_questions * (max_tasks // len(mock_questions) + 1),
+            mock_answers   * (max_tasks // len(mock_answers)   + 1),
+        )
+    ):
         goal = _build_multihop_goal(qs)
-        tasks.append(SimpleNamespace(id=f"moqa_{i:04d}", goal=goal, questions=qs))
+        tasks.append(SimpleNamespace(id=f"moqa_{i:04d}", goal=goal,
+                                     questions=qs, answers=ans))
         if len(tasks) >= max_tasks:
             break
     return tasks
@@ -295,18 +342,31 @@ def _score_moqa_answer(final_answer: str, task: Any) -> float:
     Score the agent's final answer by checking how many sub-questions
     were answered (approximate — checks for known answer strings).
     Returns a score in [0, 1].
+
+    If task.answers contains explicit expected answers (from NQ data), use those.
+    Otherwise fall back to fuzzy lookup against mock KB.
     """
     if not final_answer:
         return 0.0
 
-    answered = 0
-    for q in getattr(task, "questions", []):
-        key_words = set(q.lower().replace("?", "").split()[-3:])
-        expected  = _fuzzy_lookup(" ".join(key_words))
+    questions = getattr(task, "questions", [])
+    answers   = getattr(task, "answers",   [])
+    total     = len(questions) or 1
+    answered  = 0
+
+    for i, q in enumerate(questions):
+        # Use explicit answer if available and non-empty
+        explicit = answers[i] if i < len(answers) else ""
+        if explicit:
+            expected = explicit
+        else:
+            # Fall back: derive expected answer from mock KB using last 3 words
+            key_words = set(q.lower().replace("?", "").split()[-3:])
+            expected  = _fuzzy_lookup(" ".join(key_words))
+
         if expected.lower() in final_answer.lower():
             answered += 1
 
-    total = len(getattr(task, "questions", [1]))
     return answered / max(total, 1)
 
 

@@ -178,7 +178,8 @@ def run_benchmark(
 # ---------------------------------------------------------------------------
 
 def run_appworld(method: str, max_tasks: int, max_steps: int, verbose: bool):
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
+    TOKEN_THRESHOLD = int(os.environ.get("APPWORLD_TOKEN_THRESHOLD",
+                                         os.environ.get("TOKEN_THRESHOLD", "1500")))
     runner = _make_appworld_runner(max_tasks, max_steps)
     if runner is None:
         return
@@ -192,7 +193,8 @@ def run_appworld(method: str, max_tasks: int, max_steps: int, verbose: bool):
 
 
 def run_officebench(method: str, max_tasks: int, max_steps: int, verbose: bool):
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
+    TOKEN_THRESHOLD = int(os.environ.get("OFFICEBENCH_TOKEN_THRESHOLD",
+                                         os.environ.get("TOKEN_THRESHOLD", "4000")))
     runner = _make_officebench_runner(max_tasks, max_steps)
     if runner is None:
         return
@@ -206,7 +208,8 @@ def run_officebench(method: str, max_tasks: int, max_steps: int, verbose: bool):
 
 
 def run_multiqa(method: str, max_tasks: int, max_steps: int, verbose: bool):
-    TOKEN_THRESHOLD = int(os.environ.get("TOKEN_THRESHOLD", "500"))
+    TOKEN_THRESHOLD = int(os.environ.get("MULTIQA_TOKEN_THRESHOLD",
+                                         os.environ.get("TOKEN_THRESHOLD", "1500")))
     runner = _make_multiqa_runner(max_tasks, max_steps)
     if runner is None:
         return

@@ -188,8 +188,35 @@ async def _agent_node(state: MCPAgentState, tools: List[Any]) -> MCPAgentState:
     tool_summary = "\n".join(tool_summary_parts)
 
     has_supervisor = bool(app_tools.get("supervisor"))
+    # QA benchmark: tools named without __ (search, lookup_fact, web_search)
+    has_retrieval  = any(t.name in ("search", "lookup_fact", "web_search") for t in tools)
 
-    if has_supervisor:
+    if has_retrieval:
+        system_text = f"""You are a research agent. Answer multi-hop questions by searching for information.
+
+SEQUENCE:
+1. Read the goal carefully — it contains multiple questions numbered 1, 2, 3...
+2. For each question, call search with the exact question text to retrieve the answer.
+   Example: {{"action":"tool_call","tool":"search","input":{{"query":"Who was the first president of the United States?"}}}}
+3. After collecting all answers, respond with FINAL ANSWER listing every answer explicitly.
+
+TOOL CALL: {{"action":"tool_call","tool":"<tool_name>","input":{{"query":"<question>"}}}}
+FINAL ANSWER: 1. <answer1>
+2. <answer2>
+3. <answer3>
+
+RULES:
+- You MUST call search for EACH question before answering.
+- Include the EXACT retrieved answer text in your FINAL ANSWER.
+- FINAL ANSWER must be plain text (not JSON) starting with "FINAL ANSWER:".
+- Do NOT call finish or use JSON for the final step — use plain text "FINAL ANSWER:".
+
+Available tools:
+{tool_summary}
+
+Goal: {state["goal"]}"""
+
+    elif has_supervisor:
         system_text = f"""You are an autonomous agent. Complete the task by calling tools in sequence.
 
 GENERAL SEQUENCE:

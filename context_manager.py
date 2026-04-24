@@ -30,7 +30,7 @@ from .models import AgentContext, CCPStats, CompressionTier, ContextElement
 
 
 DEFAULT_TOKEN_THRESHOLD = 500
-RECENT_WINDOW = 2   # last N steps always kept verbatim
+RECENT_WINDOW = 4   # last N steps always kept verbatim
 
 
 # ---------------------------------------------------------------------------
