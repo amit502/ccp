@@ -456,7 +456,7 @@ class OfficeBenchMCPRunner:
         manager_factory: Callable,
         verbose:         bool,
     ) -> List[TaskResult]:
-        from ..mcp_agent import build_mcp_agent
+        from ..mcp_agent import build_shared_client, run_agent_with_tools
 
         results = []
         for task in self._tasks:
@@ -468,18 +468,80 @@ class OfficeBenchMCPRunner:
                 continue
 
             manager = manager_factory()
+            # Pass workspace file names in goal so agent knows what to open
             goal    = task.goal + (f"\n\nFiles in workspace: {workspace_files}" if workspace_files else "")
             manager.set_goal(goal)
             configs = self._server_configs(task.id, getattr(task, "app", "word"))
 
-            result = await _run_one_task(
+            # Build a fresh client per task — task_id + app differ each time
+            _, tools, interceptor = await build_shared_client(configs)
+            interceptor.set_manager(manager)
+
+            t0               = time.time()
+            peak_tokens_seen = [0]
+            compressed_map: dict = {}
+
+            original_add = manager.add_observation
+            _mgr = manager
+            def tracking_add(*args, **kwargs):
+                elem     = original_add(*args, **kwargs)
+                ctx_now  = _mgr.get_compressed_context()
+                toks     = ctx_now.total_tokens()
+                if toks > peak_tokens_seen[0]:
+                    peak_tokens_seen[0] = toks
+                ctx_step_set  = {e.step for e in ctx_now.elements}
+                current_step  = getattr(_mgr, '_step', 0)
+                for step in range(1, current_step + 1):
+                    if step not in ctx_step_set:
+                        compressed_map.setdefault(step, None)
+                for e in ctx_now.elements:
+                    if e.compressed_output is not None:
+                        compressed_map[e.step] = e.compressed_output
+                return elem
+            manager.add_observation = tracking_add
+
+            final_state  = {"step": 0}
+            success      = False
+            final_answer = None
+            try:
+                _timeout    = float(os.environ.get("TASK_TIMEOUT_SECS", "360"))
+                final_state = await asyncio.wait_for(
+                    run_agent_with_tools(
+                        goal=goal,
+                        tools=tools,
+                        max_steps=self.max_steps,
+                        compressed_map=compressed_map,
+                        manager=manager,
+                    ),
+                    timeout=_timeout,
+                )
+                success      = self._score(task.id, final_state) >= 1.0
+                final_answer = final_state.get("final_answer")
+            except asyncio.TimeoutError:
+                print(f"  [OfficeBench] Task {task.id} timed out", flush=True)
+            except Exception as exc:
+                import traceback
+                print(f"  [OfficeBench] Task {task.id} error: {type(exc).__name__}: {exc}")
+                traceback.print_exc()
+
+            interceptor.set_manager(None)
+
+            ctx          = manager.get_compressed_context()
+            final_tokens = ctx.total_tokens()
+            peak_tokens  = max(peak_tokens_seen[0], final_tokens)
+            actual_steps = final_state.get("step", 0) or len(ctx.elements)
+
+            result = TaskResult(
                 task_id=task.id,
-                goal=task.goal,
-                manager=manager,
-                server_configs=configs,
-                max_steps=self.max_steps,
-                score_fn=self._score,
-                verbose=verbose,
+                goal=goal,
+                success=success,
+                steps=actual_steps,
+                final_answer=final_answer,
+                peak_tokens=peak_tokens,
+                total_tokens=final_tokens,
+                time_elapsed=time.time() - t0,
+                ccp_stats=manager.get_stats_log(),
+                method="",
             )
             results.append(result)
 
@@ -525,9 +587,9 @@ class MultiObjQAMCPRunner:
         from ..benchmarks.multiobjqa_runner import _load_nq_tasks, _score_moqa_answer
         self._tasks        = _load_nq_tasks(max_tasks=max_tasks, hops=n_hops)
         self._score_answer = _score_moqa_answer
-        # Cached tools/interceptor — None means _run_one_task builds a fresh client.
-        # AppWorldMCPRunner pre-fetches these; MultiQA doesn't need to since the
-        # NQ MCP server is lightweight (no OpenAPI spec to fetch).
+        # Cached tools/interceptor — None causes run_acon_optimize's task_runner
+        # to build a fresh client per task via _run_one_task's fallback path.
+        # MultiQA doesn't pre-fetch because the NQ MCP server is lightweight.
         self._tools       = None
         self._interceptor = None
         print(f"[MultiObjQA/MCP] {len(self._tasks)} tasks loaded ({n_hops} hops each)")
