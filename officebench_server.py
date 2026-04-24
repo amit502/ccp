@@ -720,9 +720,9 @@ def _evaluate_task(task_id: str) -> float:
     if isinstance(criteria, list) and criteria:
         return _check_ob_criteria(criteria, state, work_dir)
 
-    # Heuristic: was an output file produced?
+    # Heuristic: was an output file produced? Use rglob — testbed files are nested.
     ext_map = {"word": "*.docx", "excel": "*.xlsx", "powerpoint": "*.pptx"}
-    if app in ext_map and list(work_dir.glob(ext_map[app])):
+    if app in ext_map and list(work_dir.rglob(ext_map[app])):
         return 1.0
     if app == "email" and state.get("sent_emails"):
         return 1.0
