@@ -30,7 +30,8 @@ from .models import AgentContext, CCPStats, CompressionTier, ContextElement
 
 
 DEFAULT_TOKEN_THRESHOLD = 500
-RECENT_WINDOW = 4   # last N steps always kept verbatim
+RECENT_WINDOW  = 2   # last N steps always kept verbatim
+MAX_ANCESTORS  = 4   # max non-anchor ancestors kept after compaction
 
 
 # ---------------------------------------------------------------------------
@@ -94,9 +95,11 @@ class CCPContextManager:
         self,
         token_threshold: int = DEFAULT_TOKEN_THRESHOLD,
         recent_window:   int = RECENT_WINDOW,
+        max_ancestors:   int = MAX_ANCESTORS,
     ):
         self.token_threshold = token_threshold
         self.recent_window   = recent_window
+        self.max_ancestors   = max_ancestors
 
         self._context:   AgentContext   = AgentContext(goal="")
         self._step:      int            = 0
@@ -180,6 +183,14 @@ class CCPContextManager:
         # survive the full trajectory regardless of exact string matching.
         anchor_steps  = {e.step for e in elements if (_heuristic_phi(e) or 0) >= 0.9}
         live_set      = self._live_ancestors(recent_steps | anchor_steps)
+
+        # Cap regular ancestors: keep only the most recent MAX_ANCESTORS non-anchor,
+        # non-recent live ancestors.  Old intermediates are dropped — the agent has
+        # already acted on their information and their values are no longer in play.
+        # Anchors (task-spec, credentials) are excluded from the cap.
+        regular_ancestors = sorted(live_set - recent_steps - anchor_steps)
+        if len(regular_ancestors) > self.max_ancestors:
+            live_set -= set(regular_ancestors[:len(regular_ancestors) - self.max_ancestors])
 
         kept: List[ContextElement] = []
         n_active = n_inert = 0

@@ -22,7 +22,7 @@ spec:
             - name: EXPERIMENT
               value: officebench_all
             - name: MAX_TASKS
-              value: "25"
+              value: "15"
             - name: MAX_STEPS
               value: "25"
             - name: OFFICEBENCH_URL
@@ -41,7 +41,7 @@ spec:
             - name: TOKEN_THRESHOLD
               value: "500"
             - name: OFFICEBENCH_TOKEN_THRESHOLD
-              value: "4000"
+              value: "200"
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             - name: OPENAI_API_KEY

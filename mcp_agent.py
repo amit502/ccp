@@ -658,6 +658,7 @@ def _coerce_tool_args(args: Dict[str, Any]) -> Dict[str, Any]:
         "phone_number", "email", "username", "password", "access_token",
         "message", "description", "content", "query", "name", "title",
         "text", "token", "url", "note", "zip_code", "postal_code",
+        "value",  # cell/form values must stay as strings (MCP schema)
     }
     _STRING_SUFFIXES = (
         "_email", "_phone", "_password", "_token", "_url",
