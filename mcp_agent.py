@@ -266,7 +266,7 @@ Available tools:
 Goal: {state["goal"]}
 
 Stored credentials (use these access_tokens directly — do NOT login again if token exists):
-{chr(10).join(f"  {app}: access_token already obtained" for app in state.get("access_tokens", {}).keys()) or "  (none yet)"}"""
+{chr(10).join(f"  {app}: {tok}" for app, tok in state.get("access_tokens", {}).items()) or "  (none yet)"}"""
     else:
         system_text = f"""You are an office automation agent. Complete the task by calling the available tools.
 
@@ -391,8 +391,10 @@ Goal: {state["goal"]}"""
         # Reasoning model — try to extract answer directly before a follow-up call
         if raw.startswith(_REASONING_SENTINEL):
             reasoning = raw[len(_REASONING_SENTINEL):]
-            # Fast path: extract FINAL ANSWER directly from reasoning
-            if "FINAL ANSWER:" in reasoning:
+            # Fast path: extract FINAL ANSWER directly from reasoning.
+            # Guard: only allow early termination after ≥3 tool calls so the agent
+            # cannot short-circuit MultiQA tasks before all searches are done.
+            if "FINAL ANSWER:" in reasoning and state.get("step", 0) >= 3:
                 raw = "FINAL ANSWER:" + reasoning.split("FINAL ANSWER:", 1)[1].strip()
                 print(f"  [LLM] extracted FINAL ANSWER from reasoning (no follow-up)", flush=True)
             else:

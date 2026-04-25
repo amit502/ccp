@@ -118,14 +118,11 @@ class ValueRegistry:
 # MCP-aware heuristics (fast path — no LLM call needed)
 # ---------------------------------------------------------------------------
 
-# Tools whose outputs almost always carry long-range causal weight
+# Tools whose outputs almost always carry long-range causal weight.
+# NOTE: pure auth tools (login/authenticate/get_token) are intentionally excluded —
+# their JWTs are injected into the system prompt via state["access_tokens"], so
+# the context element is not needed for the agent to reuse the credential.
 _HIGH_PHI_TOOLS = {
-    "login",
-    "authenticate",
-    "get_token",
-    "get_api_key",
-    "get_credentials",
-    "create_session",
     "register",
     "get_user_id",
     "get_account_id",

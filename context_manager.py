@@ -193,7 +193,13 @@ class CCPContextManager:
 
         # Always-live seeds: high-phi tool steps (task-spec, auth, credentials)
         # survive the full trajectory regardless of exact string matching.
-        anchor_steps  = {e.step for e in elements if (_heuristic_phi(e) or 0) >= 0.9}
+        # Deduplicate by tool_name: keep only the MOST RECENT call per tool so
+        # repeated credential/task lookups don't bloat the anchor set.
+        _anchor_by_tool: dict = {}
+        for e in elements:
+            if (_heuristic_phi(e) or 0) >= 0.9:
+                _anchor_by_tool[e.tool_name] = e.step
+        anchor_steps  = set(_anchor_by_tool.values())
         live_set      = self._live_ancestors(recent_steps | anchor_steps)
 
         # Cap regular ancestors: keep only the most recent MAX_ANCESTORS non-anchor,
