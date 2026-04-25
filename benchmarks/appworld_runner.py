@@ -72,11 +72,24 @@ def _load_tasks_from_fs(appworld_root: str, split: str, max_tasks: int) -> List[
     if not tasks_dir.exists():
         raise RuntimeError(f"AppWorld tasks directory not found: {tasks_dir}")
 
-    # Pinned task list takes priority — ensures all methods run the same tasks
+    # Pinned task list takes priority — ensures all methods run the same tasks.
+    # If the pin file has fewer entries than max_tasks, expand it from the
+    # dataset file so a larger re-run doesn't silently truncate.
     if TASK_IDS_FILE and Path(TASK_IDS_FILE).exists():
         raw_ids  = [l.strip() for l in Path(TASK_IDS_FILE).read_text().splitlines() if l.strip()]
         task_ids = [tid.split("#")[0] for tid in raw_ids]
         print(f"[AppWorld] Using pinned task IDs from {TASK_IDS_FILE}: {len(task_ids)} tasks")
+        if len(task_ids) < max_tasks and dataset_file.exists():
+            all_ids = [l.strip().split("#")[0]
+                       for l in dataset_file.read_text().splitlines() if l.strip()]
+            seen = set(task_ids)
+            for tid in all_ids:
+                if len(task_ids) >= max_tasks:
+                    break
+                if tid not in seen:
+                    task_ids.append(tid)
+                    seen.add(tid)
+            print(f"[AppWorld] Expanded pinned list to {len(task_ids)} tasks")
     elif dataset_file.exists():
         raw_ids  = [l.strip() for l in dataset_file.read_text().splitlines() if l.strip()]
         task_ids = [tid.split("#")[0] for tid in raw_ids]
