@@ -41,7 +41,11 @@ spec:
             - name: TOKEN_THRESHOLD
               value: "500"
             - name: OFFICEBENCH_TOKEN_THRESHOLD
-              value: "200"
+              value: "80"
+            - name: CCP_RECENT_WINDOW
+              value: "1"
+            - name: CCP_MAX_ANCESTORS
+              value: "1"
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             - name: OPENAI_API_KEY

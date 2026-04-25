@@ -23,6 +23,7 @@ exceed token_threshold.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List
 
 from .causal_scorer import ValueRegistry, _heuristic_phi
@@ -30,8 +31,8 @@ from .models import AgentContext, CCPStats, CompressionTier, ContextElement
 
 
 DEFAULT_TOKEN_THRESHOLD = 500
-RECENT_WINDOW  = 2   # last N steps always kept verbatim
-MAX_ANCESTORS  = 4   # max non-anchor ancestors kept after compaction
+RECENT_WINDOW  = int(os.environ.get("CCP_RECENT_WINDOW", "2"))
+MAX_ANCESTORS  = int(os.environ.get("CCP_MAX_ANCESTORS", "4"))
 
 
 # ---------------------------------------------------------------------------
