@@ -140,6 +140,18 @@ _HIGH_PHI_TOOLS = {
     "open_workbook",
     "open_document",
     "open_presentation",
+    # OfficeBench read/list tools — output values are computed upon (not literally
+    # re-copied into later inputs), so ValueRegistry won't detect the dependency.
+    # Must anchor so multi-step write tasks can refer back to what was read.
+    "read_content",     # word__read_content
+    "read_cell",        # excel__read_cell
+    "read_range",       # excel__read_range
+    "read_slide",       # powerpoint__read_slide
+    "read_email",       # email__read_email
+    "read_file",        # file_manager__read_file
+    "list_inbox",       # email__list_inbox
+    "list_events",      # calendar__list_events
+    "list_directory",   # file_manager__list_directory
     # MultiQA retrieval tools — answers must survive the full trajectory so the
     # agent can include them all in its final FINAL ANSWER response.
     # These exact names are unique to the NQ MCP server (no __ prefix).

@@ -295,11 +295,16 @@ Goal: {state["goal"]}"""
 
     # Build proper messages array — each tool call and result as its own turn
     # This is what the reasoning model needs to track conversation state
-    llm_messages = [{"role": "system", "content": system_text}]
 
-    # ctx_compressed: step→content (None = pruned by manager). 1-indexed by tool call order.
-    # Built by tracking_add in mcp_runner so each _agent_node call sees latest compression.
+    # Inject CSS world-state into system prompt if CCP has synthesised one.
+    # "__css__" is written into ctx_compressed by tracking_add in mcp_runner
+    # whenever the manager exposes get_css_summary().
     cmap = state.get("ctx_compressed") or {}
+    _css = cmap.get("__css__", "")
+    if _css:
+        system_text += f"\n\nKNOWN STATE (synthesised from earlier steps — use these facts directly):\n{_css}"
+
+    llm_messages = [{"role": "system", "content": system_text}]
     _tm_idx = 0  # counts ToolMessages seen; maps to manager step (1-indexed)
 
     if not state["messages"]:
