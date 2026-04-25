@@ -24,7 +24,7 @@ spec:
             - name: EXPERIMENT
               value: appworld_all
             - name: MAX_TASKS
-              value: "5"
+              value: "50"
             - name: MAX_STEPS
               value: "25"
             - name: TASK_TIMEOUT_SECS
