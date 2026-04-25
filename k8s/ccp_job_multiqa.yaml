@@ -42,6 +42,8 @@ spec:
               value: "100"
             - name: ACON_OPT_ITERS
               value: "1"
+            - name: MULTIQA_TASK_CACHE_FILE
+              value: /results/ccp/multiqa_tasks_25.json
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             - name: OPENAI_API_KEY

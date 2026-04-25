@@ -75,21 +75,38 @@ def _build_multihop_goal(questions: List[str]) -> str:
     )
 
 
+_TASK_CACHE_FILE = os.environ.get("MULTIQA_TASK_CACHE_FILE", "")
+
+
 def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
     """
     Load Natural Questions and group them into multi-hop tasks.
     Each task = `hops` NQ questions combined into one compound question.
 
     Loading priority:
+    0. Task cache file at MULTIQA_TASK_CACHE_FILE — reuses exact tasks from
+       a prior run, guaranteeing consistency across methods and ACON opt.
     1. Local JSONL file at MULTIQA_DATA_FILE env var (fastest, no network)
     2. HuggingFace Hub (requires `pip install datasets` + internet)
     3. Built-in mock questions (always works)
-
-    To use a local file:
-        # Download NQ dev set from https://ai.google.com/research/NaturalQuestions
-        export MULTIQA_DATA_FILE=/path/to/nq-dev-00.jsonl.gz
     """
     from types import SimpleNamespace
+
+    # --- Priority 0: task cache (same tasks every run) ---
+    if _TASK_CACHE_FILE and Path(_TASK_CACHE_FILE).exists():
+        try:
+            cached = json.loads(Path(_TASK_CACHE_FILE).read_text())
+            tasks = [
+                SimpleNamespace(
+                    id=t["id"], goal=t["goal"],
+                    questions=t["questions"], answers=t["answers"],
+                )
+                for t in cached[:max_tasks]
+            ]
+            print(f"[MultiObjQA] Loaded {len(tasks)} tasks from cache {_TASK_CACHE_FILE}")
+            return tasks
+        except Exception as e:
+            print(f"[MultiObjQA] Cache load failed ({e}) — re-loading from source")
 
     # qa_pairs: list of (question, answer_or_empty_string)
     qa_pairs: List[tuple] = []
@@ -156,6 +173,24 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
         ))
         if len(tasks) >= max_tasks:
             break
+
+    # Save to cache so subsequent runs (including per-method runs and ACON opt)
+    # use exactly the same tasks for consistency.
+    if _TASK_CACHE_FILE and tasks:
+        try:
+            cache_path = Path(_TASK_CACHE_FILE)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            # Only write if cache doesn't exist or has fewer tasks than loaded
+            existing_count = len(json.loads(cache_path.read_text())) if cache_path.exists() else 0
+            if existing_count < len(tasks):
+                cache_path.write_text(json.dumps([
+                    {"id": t.id, "goal": t.goal,
+                     "questions": t.questions, "answers": t.answers}
+                    for t in tasks
+                ]))
+                print(f"[MultiObjQA] Saved {len(tasks)} tasks to cache {_TASK_CACHE_FILE}")
+        except Exception as e:
+            print(f"[MultiObjQA] Cache save failed: {e}")
 
     return tasks
 
