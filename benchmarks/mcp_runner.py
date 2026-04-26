@@ -185,10 +185,13 @@ async def _run_all_tasks_async(
             for step in range(1, current_step + 1):
                 if step not in ctx_step_set:
                     compressed_map.setdefault(step, None)
-            # Mark compacted steps (CCP ancestor compaction / CSS placeholder)
+            # Mark compacted steps (CCP ancestor compaction)
             for e in ctx_now.elements:
                 if e.compressed_output is not None:
                     compressed_map[e.step] = e.compressed_output
+            # Expose intern table so execute_tool_calls can resolve $T symbols
+            if hasattr(_mgr, "intern_table") and len(_mgr.intern_table) > 0:
+                compressed_map["__interns__"] = _mgr.intern_table
             return elem
         manager.add_observation = tracking_add
 
@@ -497,6 +500,8 @@ class OfficeBenchMCPRunner:
                 for e in ctx_now.elements:
                     if e.compressed_output is not None:
                         compressed_map[e.step] = e.compressed_output
+                if hasattr(_mgr, "intern_table") and len(_mgr.intern_table) > 0:
+                    compressed_map["__interns__"] = _mgr.intern_table
                 return elem
             manager.add_observation = tracking_add
 

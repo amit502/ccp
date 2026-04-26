@@ -825,6 +825,12 @@ async def run_agent_with_tools(
                     # validation passes (it validates against the Pydantic schema).
                     args = _coerce_tool_args(args)
 
+                    # Resolve any interned JWT symbols ($T1, $T2 ...) that CCP
+                    # substituted in compressed outputs — the MCP server needs real values.
+                    _interns = compressed_map.get("__interns__") if compressed_map is not None else None
+                    if _interns is not None:
+                        args = _interns.resolve_dict(args)
+
                     raw_result = await tool.ainvoke(args)
                     # Extract text from content block format: [{"type":"text","text":"..."}]
                     if isinstance(raw_result, list):

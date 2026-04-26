@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Dict, List
 
 from .causal_scorer import ValueRegistry, _heuristic_phi
@@ -42,6 +43,58 @@ _NO_DEDUP_TOOLS: frozenset = frozenset({
     "read_slide", "read_email", "read_file",
     "list_inbox", "list_events", "list_directory",
 })
+
+
+# ---------------------------------------------------------------------------
+# ValueInternTable — lossless JWT interning
+# ---------------------------------------------------------------------------
+
+class ValueInternTable:
+    """
+    Lossless token compression via symbolic interning.
+
+    JWTs (eyJ...) are ~40-60 tokens each but semantically atomic — the agent
+    never reads them, only copies them as access_token values. Replacing each
+    unique JWT with a short symbol ($T1, $T2, ...) in stored outputs cuts
+    those tokens to 1-2 while preserving all information. The interceptor
+    resolves symbols back to real values before any tool call.
+    """
+    _JWT_RE = re.compile(
+        r'eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}'
+    )
+
+    def __init__(self) -> None:
+        self._sym_to_real: Dict[str, str] = {}
+        self._real_to_sym: Dict[str, str] = {}
+        self._count: int = 0
+
+    def intern(self, text: str) -> str:
+        """Replace each unique JWT in text with a short symbol."""
+        def _replace(m: re.Match) -> str:
+            val = m.group(0)
+            if val not in self._real_to_sym:
+                self._count += 1
+                sym = f"$T{self._count}"
+                self._real_to_sym[val] = sym
+                self._sym_to_real[sym] = val
+            return self._real_to_sym[val]
+        return self._JWT_RE.sub(_replace, text)
+
+    def resolve(self, text: str) -> str:
+        """Expand symbols back to their real JWT values."""
+        for sym, real in self._sym_to_real.items():
+            if sym in text:
+                text = text.replace(sym, real)
+        return text
+
+    def resolve_dict(self, d: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve symbols in all string values of a dict."""
+        if not self._sym_to_real:
+            return d
+        return {k: (self.resolve(v) if isinstance(v, str) else v) for k, v in d.items()}
+
+    def __len__(self) -> int:
+        return len(self._sym_to_real)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +177,7 @@ class CCPContextManager:
         self._step:      int            = 0
         self._stats_log: List[CCPStats] = []
         self._registry   = ValueRegistry()
+        self._interns    = ValueInternTable()
 
     # ------------------------------------------------------------------ #
     # Public interface                                                     #
@@ -163,10 +217,15 @@ class CCPContextManager:
     def get_stats_log(self) -> List[CCPStats]:
         return self._stats_log
 
+    @property
+    def intern_table(self) -> ValueInternTable:
+        return self._interns
+
     def reset(self, goal: str = "") -> None:
         self._context  = AgentContext(goal=goal)
         self._step     = 0
         self._registry = ValueRegistry()
+        self._interns  = ValueInternTable()
 
     # ------------------------------------------------------------------ #
     # Compression pipeline                                                 #
@@ -233,16 +292,19 @@ class CCPContextManager:
             e.phi = self._registry.phi(e.step)
 
             if e.step in recent_steps:
-                # Live frontier: keep verbatim
+                # Live frontier: keep verbatim, but intern JWTs to save tokens
                 e.tier = CompressionTier.ACTIVE
+                src = e.compressed_output if e.compressed_output is not None else e.tool_output
+                e.compressed_output = self._interns.intern(src)
                 kept.append(e)
                 n_active += 1
             elif e.step in live_set:
-                # Live ancestor: compact to just the referenced values
+                # Live ancestor: compact to referenced values, then intern JWTs
                 e.tier = CompressionTier.ACTIVE
                 if e.compressed_output is None:
                     values = self._registry.output_values(e.step)
                     e.compressed_output = _compact(e, values)
+                e.compressed_output = self._interns.intern(e.compressed_output)
                 kept.append(e)
                 n_active += 1
             else:
