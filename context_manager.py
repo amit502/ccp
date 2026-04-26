@@ -295,16 +295,21 @@ class CCPContextManager:
                 e.tier = CompressionTier.ACTIVE
                 _is_anchor = (_heuristic_phi(e) or 0) >= 0.9
                 _is_last   = (e.step == max(recent_steps))
-                if _is_anchor and not _is_last:
-                    # High-phi non-latest recent step (e.g. read_range at N-1):
-                    # compact to key values — the agent already acted on it and
-                    # keeping the full data grid verbatim wastes tokens.
+                _is_data_provider = any(
+                    e.tool_name == nd or e.tool_name.endswith(f"__{nd}") or e.tool_name.endswith(nd)
+                    for nd in _NO_DEDUP_TOOLS
+                )
+                if _is_anchor and not _is_last and not _is_data_provider:
+                    # Credential/handle anchor at N-1 (e.g. show_profile, open_workbook):
+                    # compact to key values — the agent already acted on it.
+                    # Data-provider tools (_NO_DEDUP_TOOLS: read_range, read_cell, etc.)
+                    # are excluded: their data grids are needed for active computation.
                     if e.compressed_output is None:
                         values = self._registry.output_values(e.step)
                         e.compressed_output = _compact(e, values)
                     e.compressed_output = self._interns.intern(e.compressed_output)
                 else:
-                    # Most-recent step or non-anchor: keep verbatim, just intern JWTs
+                    # Last step, non-anchor, or data-provider: keep verbatim, just intern JWTs
                     src = e.compressed_output if e.compressed_output is not None else e.tool_output
                     e.compressed_output = self._interns.intern(src)
                 kept.append(e)

@@ -41,6 +41,10 @@ spec:
               value: "500"
             - name: APPWORLD_TOKEN_THRESHOLD
               value: "600"
+            - name: CCP_RECENT_WINDOW
+              value: "2"
+            - name: CCP_MAX_ANCESTORS
+              value: "1"
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             # Pinned task list — written on first run, reused on all subsequent runs
