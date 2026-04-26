@@ -292,10 +292,21 @@ class CCPContextManager:
             e.phi = self._registry.phi(e.step)
 
             if e.step in recent_steps:
-                # Live frontier: keep verbatim, but intern JWTs to save tokens
                 e.tier = CompressionTier.ACTIVE
-                src = e.compressed_output if e.compressed_output is not None else e.tool_output
-                e.compressed_output = self._interns.intern(src)
+                _is_anchor = (_heuristic_phi(e) or 0) >= 0.9
+                _is_last   = (e.step == max(recent_steps))
+                if _is_anchor and not _is_last:
+                    # High-phi non-latest recent step (e.g. read_range at N-1):
+                    # compact to key values — the agent already acted on it and
+                    # keeping the full data grid verbatim wastes tokens.
+                    if e.compressed_output is None:
+                        values = self._registry.output_values(e.step)
+                        e.compressed_output = _compact(e, values)
+                    e.compressed_output = self._interns.intern(e.compressed_output)
+                else:
+                    # Most-recent step or non-anchor: keep verbatim, just intern JWTs
+                    src = e.compressed_output if e.compressed_output is not None else e.tool_output
+                    e.compressed_output = self._interns.intern(src)
                 kept.append(e)
                 n_active += 1
             elif e.step in live_set:
