@@ -22,7 +22,7 @@ spec:
             - name: EXPERIMENT
               value: officebench_all
             - name: MAX_TASKS
-              value: "25"
+              value: "10"
             - name: MAX_STEPS
               value: "25"
             - name: OFFICEBENCH_URL

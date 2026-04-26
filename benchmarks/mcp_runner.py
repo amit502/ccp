@@ -189,12 +189,6 @@ async def _run_all_tasks_async(
             for e in ctx_now.elements:
                 if e.compressed_output is not None:
                     compressed_map[e.step] = e.compressed_output
-            # CSS world-state: inject into compressed_map so _agent_node
-            # can append it to the system prompt each turn.
-            if hasattr(_mgr, "get_css_summary"):
-                css = _mgr.get_css_summary()
-                if css:
-                    compressed_map["__css__"] = css
             return elem
         manager.add_observation = tracking_add
 
@@ -503,11 +497,6 @@ class OfficeBenchMCPRunner:
                 for e in ctx_now.elements:
                     if e.compressed_output is not None:
                         compressed_map[e.step] = e.compressed_output
-                # CSS world-state injection
-                if hasattr(_mgr, "get_css_summary"):
-                    css = _mgr.get_css_summary()
-                    if css:
-                        compressed_map["__css__"] = css
                 return elem
             manager.add_observation = tracking_add
 
