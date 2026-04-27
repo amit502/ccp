@@ -206,7 +206,11 @@ class CCPContextManager:
         status:      str = "ok",
     ) -> ContextElement:
         self._step += 1
-        self._registry.register_input(self._step, str(tool_input))
+        # Intern JWTs in registered input so they don't create transitive BFS
+        # parent links back to credential steps (show_account_passwords etc.).
+        # Without this, auto-injected JWTs keep login ancestors alive forever.
+        interned_input = self._interns.intern(str(tool_input))
+        self._registry.register_input(self._step, interned_input)
         self._registry.register_output(self._step, tool_output)
 
         element = ContextElement(
