@@ -291,11 +291,15 @@ class CCPContextManager:
         # ─────────────────────────────────────────────────────────────────────
 
         # Text of the single most-recent step's inputs — used for freshness check.
+        # Intern JWTs here so credential anchors (show_account_passwords etc.) correctly
+        # expire: after the JWT chain fix, registered inputs store $T1 not real JWTs, so
+        # output_values() returns the real JWT while this text has $T1 — no match → expired.
+        # Non-JWT values (cell data, IDs) are unaffected by interning.
         recent_input_text: str = ""
         if elements:
-            recent_input_text = " ".join(
+            recent_input_text = self._interns.intern(" ".join(
                 str(e.tool_input) for e in elements if e.step in recent_steps
-            )
+            ))
 
         def _is_fresh(step: int) -> bool:
             values = self._registry.output_values(step)
@@ -342,6 +346,25 @@ class CCPContextManager:
         if len(regular_ancestors) > self.max_ancestors:
             live_set -= set(regular_ancestors[:len(regular_ancestors) - self.max_ancestors])
 
+        # ── Adaptive State Distillation (ASD) ──────────────────────────────────
+        # Regular live ancestors (non-anchor, non-recent) are merged into a single
+        # synthetic "_state_" dict rather than kept as individual ContextElements.
+        # This replaces N×~50t individual records with one ~20t merged JSON dict,
+        # cutting mean tokens and beating fifo on efficiency.
+        #
+        # Carry forward content from any prior synthetic state snapshot so that
+        # information accumulated in previous compression cycles is not lost.
+        # ─────────────────────────────────────────────────────────────────────
+        ancestor_kv: Dict[str, Any] = {}
+        for prior_e in self._context.elements:
+            if prior_e.step == 0 and prior_e.tool_name == "_state_":
+                try:
+                    prior_data = json.loads(prior_e.compressed_output or "{}")
+                    if isinstance(prior_data, dict):
+                        ancestor_kv.update(prior_data)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
         kept: List[ContextElement] = []
         n_active = n_inert = 0
 
@@ -371,8 +394,8 @@ class CCPContextManager:
                     e.compressed_output = self._interns.intern(src)
                 kept.append(e)
                 n_active += 1
-            elif e.step in live_set:
-                # Live ancestor: compact to referenced values, then intern JWTs
+            elif e.step in anchor_steps:
+                # Anchor: keep as individual element (search results, data reads, handles)
                 e.tier = CompressionTier.ACTIVE
                 if e.compressed_output is None:
                     values = self._registry.output_values(e.step)
@@ -380,10 +403,40 @@ class CCPContextManager:
                 e.compressed_output = self._interns.intern(e.compressed_output)
                 kept.append(e)
                 n_active += 1
+            elif e.step in live_set:
+                # Regular live ancestor: merge into synthetic state snapshot instead of
+                # keeping as a separate element — eliminates per-record overhead.
+                e.tier = CompressionTier.ACTIVE
+                if e.compressed_output is None:
+                    values = self._registry.output_values(e.step)
+                    e.compressed_output = _compact(e, values)
+                try:
+                    data = json.loads(e.compressed_output)
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            ancestor_kv[k] = v   # newer step overrides older
+                except (json.JSONDecodeError, TypeError):
+                    ancestor_kv[f"_s{e.step}"] = e.compressed_output[:80]
+                n_active += 1
             else:
                 # Dead branch or unreferenced: drop completely
                 e.tier = CompressionTier.INERT
                 n_inert += 1
+
+        # Build synthetic state snapshot from all merged live ancestor key-values
+        if ancestor_kv:
+            snap_str = self._interns.intern(json.dumps(ancestor_kv))
+            snap = ContextElement(
+                step=0,
+                tool_name="_state_",
+                tool_input={},
+                tool_output=snap_str,
+                compressed_output=snap_str,
+                status="ok",
+            )
+            snap.tier = CompressionTier.ACTIVE
+            kept.insert(0, snap)
+            n_active += 1
 
         self._context.elements = kept
 
