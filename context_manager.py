@@ -355,13 +355,31 @@ class CCPContextManager:
         # Carry forward content from any prior synthetic state snapshot so that
         # information accumulated in previous compression cycles is not lost.
         # ─────────────────────────────────────────────────────────────────────
+        # JWT intern symbols ($T1, $T2 …) are auto-resolved before every tool call
+        # by mcp_agent.py — the agent never needs to read them.  Excluding them
+        # from the state dict prevents stale auth entries from accumulating.
+        _INTERN_SYM = re.compile(r'^\$T\d+$')
+
+        def _merge_into_state(output: str) -> None:
+            """Parse a compacted JSON output and merge non-JWT KV pairs into ancestor_kv."""
+            try:
+                data = json.loads(output)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if not _INTERN_SYM.match(str(v)):
+                            ancestor_kv[k] = v
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         ancestor_kv: Dict[str, Any] = {}
         for prior_e in self._context.elements:
             if prior_e.step == 0 and prior_e.tool_name == "_state_":
                 try:
                     prior_data = json.loads(prior_e.compressed_output or "{}")
                     if isinstance(prior_data, dict):
-                        ancestor_kv.update(prior_data)
+                        for k, v in prior_data.items():
+                            if not _INTERN_SYM.match(str(v)):
+                                ancestor_kv[k] = v
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -380,14 +398,14 @@ class CCPContextManager:
                     for nd in _NO_DEDUP_TOOLS
                 )
                 if _is_anchor and not _is_last and not _is_data_provider:
-                    # Credential/handle anchor at N-1 (e.g. show_profile, open_workbook):
-                    # compact to key values — the agent already acted on it.
-                    # Data-provider tools (_NO_DEDUP_TOOLS: read_range, read_cell, etc.)
-                    # are excluded: their data grids are needed for active computation.
+                    # Credential/handle anchor at N-1: compact + merge into state dict.
+                    # The agent already acted on it; key values flow into the snapshot.
                     if e.compressed_output is None:
                         values = self._registry.output_values(e.step)
                         e.compressed_output = _compact(e, values)
                     e.compressed_output = self._interns.intern(e.compressed_output)
+                    _merge_into_state(e.compressed_output)
+                    # Still appended verbatim so agent sees the action that just happened.
                 else:
                     # Last step, non-anchor, or data-provider: keep verbatim, just intern JWTs
                     src = e.compressed_output if e.compressed_output is not None else e.tool_output
@@ -395,28 +413,31 @@ class CCPContextManager:
                 kept.append(e)
                 n_active += 1
             elif e.step in anchor_steps:
-                # Anchor: keep as individual element (search results, data reads, handles)
+                # Only _NO_DEDUP_TOOLS (search results, data grids) need individual records
+                # because they carry list structure that a flat dict can't represent.
+                # All other anchors (credentials, handles, profile lookups) are compacted
+                # and merged into the state dict — same information, zero per-record overhead.
+                _is_no_dedup = any(
+                    e.tool_name == nd or e.tool_name.endswith(f"__{nd}") or e.tool_name.endswith(nd)
+                    for nd in _NO_DEDUP_TOOLS
+                )
                 e.tier = CompressionTier.ACTIVE
                 if e.compressed_output is None:
                     values = self._registry.output_values(e.step)
                     e.compressed_output = _compact(e, values)
                 e.compressed_output = self._interns.intern(e.compressed_output)
-                kept.append(e)
+                if _is_no_dedup:
+                    kept.append(e)
+                else:
+                    _merge_into_state(e.compressed_output)
                 n_active += 1
             elif e.step in live_set:
-                # Regular live ancestor: merge into synthetic state snapshot instead of
-                # keeping as a separate element — eliminates per-record overhead.
+                # Regular live ancestor: merge into synthetic state snapshot.
                 e.tier = CompressionTier.ACTIVE
                 if e.compressed_output is None:
                     values = self._registry.output_values(e.step)
                     e.compressed_output = _compact(e, values)
-                try:
-                    data = json.loads(e.compressed_output)
-                    if isinstance(data, dict):
-                        for k, v in data.items():
-                            ancestor_kv[k] = v   # newer step overrides older
-                except (json.JSONDecodeError, TypeError):
-                    ancestor_kv[f"_s{e.step}"] = e.compressed_output[:80]
+                _merge_into_state(self._interns.intern(e.compressed_output))
                 n_active += 1
             else:
                 # Dead branch or unreferenced: drop completely
