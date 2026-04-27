@@ -274,7 +274,12 @@ class CCPContextManager:
                 if is_no_dedup:
                     anchor_keep_all.add(e.step)
                 else:
-                    _anchor_by_tool[tool] = e.step
+                    # Dedup by tool suffix so per-app variants of the same tool
+                    # (e.g. venmo__get_user_id, amazon__get_user_id) share one slot.
+                    # Keeps the most-recent call; earlier ones fall through to
+                    # ValueRegistry ancestry or are dropped as dead branches.
+                    tool_key = tool.split("__")[-1] if "__" in tool else tool
+                    _anchor_by_tool[tool_key] = e.step
 
         anchor_steps = set(_anchor_by_tool.values()) | anchor_keep_all
         live_set     = self._live_ancestors(recent_steps | anchor_steps)

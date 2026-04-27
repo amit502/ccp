@@ -103,8 +103,15 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
                 )
                 for t in cached[:max_tasks]
             ]
-            print(f"[MultiObjQA] Loaded {len(tasks)} tasks from cache {_TASK_CACHE_FILE}")
-            return tasks
+            # Validate: if ALL answers are empty the cache was built before the
+            # NQ answer-extraction fix was applied — discard and rebuild.
+            all_answers = [a for t in tasks for a in t.answers]
+            has_answers = any(a and str(a).strip() for a in all_answers)
+            if tasks and has_answers:
+                print(f"[MultiObjQA] Loaded {len(tasks)} tasks from cache {_TASK_CACHE_FILE}")
+                return tasks
+            print(f"[MultiObjQA] Cache has empty answers — rebuilding from source")
+            Path(_TASK_CACHE_FILE).unlink(missing_ok=True)
         except Exception as e:
             print(f"[MultiObjQA] Cache load failed ({e}) — re-loading from source")
 
@@ -180,9 +187,7 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
         try:
             cache_path = Path(_TASK_CACHE_FILE)
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            # Only write if cache doesn't exist or has fewer tasks than loaded
-            existing_count = len(json.loads(cache_path.read_text())) if cache_path.exists() else 0
-            if existing_count < len(tasks):
+            if not cache_path.exists():
                 cache_path.write_text(json.dumps([
                     {"id": t.id, "goal": t.goal,
                      "questions": t.questions, "answers": t.answers}
