@@ -35,14 +35,26 @@ DEFAULT_TOKEN_THRESHOLD = 500
 RECENT_WINDOW  = int(os.environ.get("CCP_RECENT_WINDOW", "2"))
 MAX_ANCESTORS  = int(os.environ.get("CCP_MAX_ANCESTORS", "4"))
 
-# Tools where EVERY anchor instance is kept (no deduplication by tool_name).
-# These produce independent results per call — deduping would lose earlier answers.
-_NO_DEDUP_TOOLS: frozenset = frozenset({
-    "search", "lookup_fact", "web_search",      # MultiQA — each query is a separate answer
-    "read_cell", "read_range", "read_content",  # OfficeBench — may read different ranges
+# Tools whose EVERY instance is kept forever — each call returns a unique,
+# independent answer that will be needed in the final response.
+# MultiQA search results all appear in the final combined answer.
+_MULTI_RESULT_TOOLS: frozenset = frozenset({
+    "search", "lookup_fact", "web_search",
+})
+
+# Tools that read data the agent computes with.  Each call is independent
+# (different cells / ranges / slides) so we keep all instances — but only
+# while they are still "fresh" (their values still referenced by recent steps).
+# Once the agent has moved past the computation, these expire.
+_DATA_READ_TOOLS: frozenset = frozenset({
+    "read_cell", "read_range", "read_content",
     "read_slide", "read_email", "read_file",
     "list_inbox", "list_events", "list_directory",
 })
+
+# Combined: the old _NO_DEDUP_TOOLS — used only for the N-1 compaction guard
+# (data-provider tools must not be compacted at recent position N-1).
+_NO_DEDUP_TOOLS: frozenset = _MULTI_RESULT_TOOLS | _DATA_READ_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -257,29 +269,65 @@ class CCPContextManager:
 
         recent_steps  = {e.step for e in elements[-self.recent_window:]}
 
-        # Anchor seeds: high-phi tools that survive the full trajectory.
-        # _NO_DEDUP_TOOLS keep ALL instances (each call is independent, e.g.
-        # MultiQA search answers, OfficeBench read results).
-        # All other high-phi tools: deduplicate to most-recent call per tool_name
-        # so repeated credential/task lookups don't bloat the anchor set.
+        # ── Temporal Anchor Freshness (TAF) ─────────────────────────────────
+        # Anchors are only kept while their output values are still referenced
+        # by the most-recent step's inputs.  Once the agent has moved past the
+        # computation that needed those values, the anchor expires and falls
+        # through to ValueRegistry ancestry (kept if still depended upon) or
+        # dead-branch elimination (dropped).
+        #
+        # Three anchor categories:
+        #  _MULTI_RESULT_TOOLS  — kept FOREVER (all search answers needed at end)
+        #  _DATA_READ_TOOLS     — freshness-gated: drop once values leave recent inputs
+        #  all other high-phi   — freshness-gated + suffix-deduped (one slot per tool type)
+        #
+        # Safe default: if a step has NO extractable values (e.g. open_workbook
+        # whose workbook_id is hex-filtered), it's always treated as fresh so
+        # we never accidentally drop a critical handle anchor.
+        # ─────────────────────────────────────────────────────────────────────
+
+        # Text of the single most-recent step's inputs — used for freshness check.
+        recent_input_text: str = ""
+        if elements:
+            recent_input_text = " ".join(
+                str(e.tool_input) for e in elements if e.step in recent_steps
+            )
+
+        def _is_fresh(step: int) -> bool:
+            values = self._registry.output_values(step)
+            if not values:
+                return True   # no extracted values → assume fresh (safe default)
+            return any(v in recent_input_text for v in values)
+
         _anchor_by_tool: Dict[str, int] = {}
         anchor_keep_all: set = set()
         for e in elements:
             if (_heuristic_phi(e) or 0) >= 0.9:
                 tool = e.tool_name
-                is_no_dedup = any(
+
+                is_multi = any(
                     tool == nd or tool.endswith(f"__{nd}") or tool.endswith(nd)
-                    for nd in _NO_DEDUP_TOOLS
+                    for nd in _MULTI_RESULT_TOOLS
                 )
-                if is_no_dedup:
+                is_data_read = any(
+                    tool == nd or tool.endswith(f"__{nd}") or tool.endswith(nd)
+                    for nd in _DATA_READ_TOOLS
+                )
+
+                if is_multi:
+                    # Search/lookup: keep ALL instances regardless of freshness
                     anchor_keep_all.add(e.step)
+                elif is_data_read:
+                    # Data-read: keep this instance only while values are fresh
+                    if _is_fresh(e.step):
+                        anchor_keep_all.add(e.step)
+                    # else: expired — fall through to BFS / dead-branch
                 else:
-                    # Dedup by tool suffix so per-app variants of the same tool
-                    # (e.g. venmo__get_user_id, amazon__get_user_id) share one slot.
-                    # Keeps the most-recent call; earlier ones fall through to
-                    # ValueRegistry ancestry or are dropped as dead branches.
-                    tool_key = tool.split("__")[-1] if "__" in tool else tool
-                    _anchor_by_tool[tool_key] = e.step
+                    # Credential / handle anchor: dedup by suffix, freshness-gated
+                    if _is_fresh(e.step):
+                        tool_key = tool.split("__")[-1] if "__" in tool else tool
+                        _anchor_by_tool[tool_key] = e.step
+                    # else: expired — fall through to BFS / dead-branch
 
         anchor_steps = set(_anchor_by_tool.values()) | anchor_keep_all
         live_set     = self._live_ancestors(recent_steps | anchor_steps)
