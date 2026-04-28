@@ -164,8 +164,13 @@ def _init_kb() -> Dict[str, str]:
 
 
 def _fuzzy_lookup(query: str, kb: Dict[str, str]) -> str:
-    """Return best matching answer from KB using word overlap."""
-    q_words = set(_normalise(query).split())
+    """Return best matching answer from KB using exact match, then word overlap."""
+    q_norm = _normalise(query)
+    # Exact match: agent searched with the verbatim question text → guaranteed correct
+    if q_norm in kb:
+        return kb[q_norm]
+
+    q_words = set(q_norm.split())
     best_score = 0
     best_ans   = "No answer found in knowledge base."
 

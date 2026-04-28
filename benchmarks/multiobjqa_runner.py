@@ -112,16 +112,22 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
                 )
                 for t in cached[:max_tasks]
             ]
-            # Validate answers are present and goals have the step-by-step format.
-            # Old caches lack "Complete exactly" phrasing and caused agent looping.
+            # Validate: goals must be step-by-step format AND all answers non-empty.
+            # Old caches may lack "Complete exactly" or contain questions with no NQ
+            # short answer (which score 0 regardless of what the agent retrieves).
             all_answers = [a for t in tasks for a in t.answers]
-            has_answers = any(a and str(a).strip() for a in all_answers)
+            all_answers_filled = all(a and str(a).strip() for a in all_answers)
             has_new_goals = tasks and "Complete exactly" in tasks[0].goal
-            if tasks and has_answers and has_new_goals:
+            if tasks and all_answers_filled and has_new_goals:
                 print(f"[MultiObjQA] Loaded {len(tasks)} tasks from cache {_TASK_CACHE_FILE}")
                 return tasks
-            reason = "empty answers" if not has_answers else "old goal format"
-            print(f"[MultiObjQA] Cache has {reason} — rebuilding from source")
+            if not has_new_goals:
+                reason = "old goal format"
+            elif not all_answers_filled:
+                reason = "tasks contain questions with no NQ short answer"
+            else:
+                reason = "validation failed"
+            print(f"[MultiObjQA] Cache invalid ({reason}) — rebuilding from source")
             Path(_TASK_CACHE_FILE).unlink(missing_ok=True)
         except Exception as e:
             print(f"[MultiObjQA] Cache load failed ({e}) — re-loading from source")
@@ -132,7 +138,8 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
     # --- Priority 1: local file ---
     local_path = os.environ.get("MULTIQA_DATA_FILE", "")
     if local_path and Path(local_path).exists():
-        qa_pairs = _load_nq_qa_from_file(local_path, max_tasks * hops)
+        qa_pairs = [(q, a) for q, a in _load_nq_qa_from_file(local_path, max_tasks * hops * 5) if a]
+        qa_pairs = qa_pairs[:max_tasks * hops]
 
     # --- Priority 2: HuggingFace Hub ---
     if not qa_pairs and HF_AVAILABLE:
@@ -163,7 +170,11 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
                             ans = str(first) if first else ""
                 except Exception:
                     pass
-                qa_pairs.append((q.strip(), ans))
+                # Only keep QA pairs with real short answers — questions without
+                # short answers are absent from the NQ MCP KB, so scoring would
+                # always return 0 for them regardless of what the agent retrieves.
+                if ans:
+                    qa_pairs.append((q.strip(), ans))
                 if len(qa_pairs) >= max_tasks * hops:
                     break
             if qa_pairs:
