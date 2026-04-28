@@ -20,7 +20,7 @@ spec:
             - name: EXPERIMENT
               value: multiqa_all
             - name: MAX_TASKS
-              value: "5"
+              value: "25"
             - name: MAX_STEPS
               value: "6"
             - name: TASK_TIMEOUT_SECS
