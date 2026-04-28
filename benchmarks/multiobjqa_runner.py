@@ -346,6 +346,15 @@ def _fuzzy_lookup(query: str) -> str:
     return best_ans
 
 
+_MOQA_TOOLS_HINT = (
+    "\n\nAvailable tools — use EXACTLY these names:\n"
+    "  search__query(query)            — search for information about any topic\n"
+    "  kb__lookup(entity, attribute)   — look up a specific fact about an entity\n"
+    "  web__fetch(url)                 — fetch content from a URL\n"
+    "Call tools to retrieve each answer, then respond with action=finish."
+)
+
+
 def _register_moqa_tools(registry: Dict[str, Any]) -> None:
     """Register retrieval tools for the multi-objective QA setting."""
 
@@ -454,7 +463,10 @@ class MultiObjQARunner:
                       f"{task.goal[:60]}...")
 
             manager = manager_factory()
-            manager.set_goal(task.goal)
+            # Append tool names to goal so the agent knows exactly which tools
+            # to call — without this, agent.py's prompt never lists them and the
+            # LLM guesses wrong names, getting "not registered" errors every step.
+            manager.set_goal(task.goal + _MOQA_TOOLS_HINT)
             _TOOL_REGISTRY.clear()
             _register_moqa_tools(_TOOL_REGISTRY)
 
