@@ -30,6 +30,9 @@ from mcp import types as mcp_types
 # ---------------------------------------------------------------------------
 
 MULTIQA_DATA_FILE = os.environ.get("MULTIQA_DATA_FILE", "")
+# JSON cache so repeated per-call subprocess restarts load in milliseconds
+# instead of re-fetching 2500+ items from HuggingFace every time.
+_NQ_KB_CACHE_FILE = os.environ.get("NQ_KB_CACHE_FILE", "/tmp/nq_kb_cache.json")
 _NQ_KB: Dict[str, str] = {}   # question (normalised) → short answer
 
 
@@ -110,28 +113,54 @@ def _load_hf_kb(max_items: int = 5000) -> Dict[str, str]:
 
 
 def _init_kb() -> Dict[str, str]:
+    import sys
+
+    # Fast path: JSON cache written by a previous startup in this pod run.
+    # With per-call subprocess restarts, this cuts load time from ~100s to <1s.
+    if _NQ_KB_CACHE_FILE and Path(_NQ_KB_CACHE_FILE).exists():
+        try:
+            kb = json.loads(Path(_NQ_KB_CACHE_FILE).read_text())
+            if kb:
+                print(f"[NQ MCP] Loaded {len(kb)} QA pairs from cache {_NQ_KB_CACHE_FILE}",
+                      file=sys.stderr)
+                return kb
+        except Exception as e:
+            print(f"[NQ MCP] Cache read failed ({e}) — reloading from source", file=sys.stderr)
+
+    # Slow path: load from local file or HuggingFace
+    kb: Dict[str, str] = {}
     if MULTIQA_DATA_FILE and Path(MULTIQA_DATA_FILE).exists():
-        return _load_nq_kb(MULTIQA_DATA_FILE)
-    kb = _load_hf_kb()
-    if kb:
-        return kb
-    # Minimal fallback — enough to test the pipeline
-    print("[NQ MCP] No NQ data found. Using minimal built-in KB.",
-          file=__import__("sys").stderr)
-    return {
-        "who was the first president of the united states":  "George Washington",
-        "when was the eiffel tower completed":               "1889",
-        "what is the capital of australia":                  "Canberra",
-        "who wrote 1984":                                    "George Orwell",
-        "what is the chemical symbol for gold":              "Au",
-        "what is the largest planet in the solar system":    "Jupiter",
-        "who painted the mona lisa":                         "Leonardo da Vinci",
-        "when did world war ii end":                         "1945",
-        "what is the speed of light in kilometers per second": "299792",
-        "who discovered penicillin":                         "Alexander Fleming",
-        "what is the longest river in the world":            "Nile River",
-        "what is the currency of japan":                     "Japanese yen",
-    }
+        kb = _load_nq_kb(MULTIQA_DATA_FILE)
+    if not kb:
+        kb = _load_hf_kb()
+    if not kb:
+        # Minimal fallback — enough to test the pipeline
+        print("[NQ MCP] No NQ data found. Using minimal built-in KB.", file=sys.stderr)
+        kb = {
+            "who was the first president of the united states":  "George Washington",
+            "when was the eiffel tower completed":               "1889",
+            "what is the capital of australia":                  "Canberra",
+            "who wrote 1984":                                    "George Orwell",
+            "what is the chemical symbol for gold":              "Au",
+            "what is the largest planet in the solar system":    "Jupiter",
+            "who painted the mona lisa":                         "Leonardo da Vinci",
+            "when did world war ii end":                         "1945",
+            "what is the speed of light in kilometers per second": "299792",
+            "who discovered penicillin":                         "Alexander Fleming",
+            "what is the longest river in the world":            "Nile River",
+            "what is the currency of japan":                     "Japanese yen",
+        }
+
+    # Write cache for subsequent startups within this pod run
+    if _NQ_KB_CACHE_FILE and kb:
+        try:
+            Path(_NQ_KB_CACHE_FILE).parent.mkdir(parents=True, exist_ok=True)
+            Path(_NQ_KB_CACHE_FILE).write_text(json.dumps(kb))
+            print(f"[NQ MCP] Cached {len(kb)} QA pairs to {_NQ_KB_CACHE_FILE}", file=sys.stderr)
+        except Exception as e:
+            print(f"[NQ MCP] Cache write failed ({e})", file=sys.stderr)
+
+    return kb
 
 
 def _fuzzy_lookup(query: str, kb: Dict[str, str]) -> str:
