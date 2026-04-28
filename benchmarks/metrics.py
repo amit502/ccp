@@ -49,37 +49,16 @@ def mean_peak_token_usage(results: List[TaskResult]) -> float:
 
 def context_dependency(results: List[TaskResult]) -> float:
     """
-    Area under the token-count-over-steps curve, normalised by steps.
-    Measures sustained context pressure.
-    Higher = more tokens used for longer = more context-heavy.
-    Matches ACON's reporting of this metric.
+    Mean final context size (tokens) across tasks.
 
-    Note: We approximate the AUC from the CCPStats log (compression events).
-    For baselines without stats, we use peak_tokens * steps as a proxy.
+    Uses r.total_tokens for every method — the context size at task end.
+    This gives a consistent apples-to-apples comparison: all methods are
+    measured at the same point (end of task) rather than CCP being measured
+    at compression-event samples (which inflated its CtxDep vs baselines).
     """
-    auc_values = []
-
-    for r in results:
-        if r.ccp_stats and len(r.ccp_stats) > 1:
-            # Multiple compression events — compute trapezoidal AUC
-            steps  = [s.step   for s in r.ccp_stats]
-            tokens = [s.tokens_after for s in r.ccp_stats]
-            auc = sum(
-                (tokens[i] + tokens[i-1]) / 2 * (steps[i] - steps[i-1])
-                for i in range(1, len(steps))
-            )
-            auc_values.append(auc / max(r.steps, 1))
-        elif r.ccp_stats:
-            # Single compression event — use tokens_after from that event
-            auc_values.append(r.ccp_stats[-1].tokens_after)
-        else:
-            # No compression events (never exceeded threshold).
-            # Use total_tokens (final context size) as the proxy — it equals
-            # peak_tokens for no-compression methods and is a tighter bound
-            # than always reporting peak for methods that compressed.
-            auc_values.append(r.total_tokens)
-
-    return sum(auc_values) / len(auc_values) if auc_values else 0.0
+    if not results:
+        return 0.0
+    return sum(r.total_tokens for r in results) / len(results)
 
 
 # ---------------------------------------------------------------------------
