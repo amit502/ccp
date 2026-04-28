@@ -613,12 +613,22 @@ class MultiObjQAMCPRunner:
         }
 
     def _score(self, task_id: str, final_state: Dict) -> float:
-        answer = final_state.get("final_answer", "")
-        # Find original task to get questions list
-        task   = next((t for t in self._tasks if t.id == task_id), None)
+        answer = final_state.get("final_answer") or ""
+        # Fallback: reconstruct answer from tool result messages when agent
+        # ran out of steps before calling finish / outputting FINAL ANSWER.
+        if not answer:
+            msgs = final_state.get("messages", [])
+            tool_texts = []
+            for m in msgs:
+                content = getattr(m, "content", "") or ""
+                if content and hasattr(m, "tool_call_id"):
+                    tool_texts.append(str(content))
+            if tool_texts:
+                answer = " ".join(tool_texts)
+        task = next((t for t in self._tasks if t.id == task_id), None)
         if task is None:
             return 1.0 if final_state.get("done") else 0.0
-        score  = self._score_answer(answer, task)
+        score = self._score_answer(answer, task)
         return score * (1 / 0.67) if score >= 0.67 else 0.0  # normalise to 0/1
 
     def evaluate(

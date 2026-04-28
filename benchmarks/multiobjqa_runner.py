@@ -65,13 +65,22 @@ except ImportError:
 def _build_multihop_goal(questions: List[str]) -> str:
     """
     Combine N single-hop questions into one compound multi-objective task.
-    The agent must retrieve answers to all sub-questions and combine them.
+    Explicit step-by-step instructions prevent the agent from looping on
+    one question; it must search each question exactly once then call finish.
     """
+    n = len(questions)
+    steps = "\n".join(
+        f"  Step {i+1}: call search tool with the text of question {i+1} as the query."
+        for i in range(n)
+    )
     numbered = "\n".join(f"  {i+1}. {q}" for i, q in enumerate(questions))
     return (
-        f"Answer all of the following questions. Use search tools to retrieve "
-        f"the required information. Provide a final combined answer.\n\n"
-        f"Questions:\n{numbered}"
+        f"Complete exactly {n+1} steps in order:\n"
+        f"{steps}\n"
+        f"  Step {n+1}: output your FINAL ANSWER listing the answer to each question.\n\n"
+        f"Questions:\n{numbered}\n\n"
+        f"RULES: search each question exactly once (do not repeat searches). "
+        f"After step {n}, output FINAL ANSWER — do not search again."
     )
 
 
@@ -103,14 +112,16 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
                 )
                 for t in cached[:max_tasks]
             ]
-            # Validate: if ALL answers are empty the cache was built before the
-            # NQ answer-extraction fix was applied — discard and rebuild.
+            # Validate answers are present and goals have the step-by-step format.
+            # Old caches lack "Complete exactly" phrasing and caused agent looping.
             all_answers = [a for t in tasks for a in t.answers]
             has_answers = any(a and str(a).strip() for a in all_answers)
-            if tasks and has_answers:
+            has_new_goals = tasks and "Complete exactly" in tasks[0].goal
+            if tasks and has_answers and has_new_goals:
                 print(f"[MultiObjQA] Loaded {len(tasks)} tasks from cache {_TASK_CACHE_FILE}")
                 return tasks
-            print(f"[MultiObjQA] Cache has empty answers — rebuilding from source")
+            reason = "empty answers" if not has_answers else "old goal format"
+            print(f"[MultiObjQA] Cache has {reason} — rebuilding from source")
             Path(_TASK_CACHE_FILE).unlink(missing_ok=True)
         except Exception as e:
             print(f"[MultiObjQA] Cache load failed ({e}) — re-loading from source")
