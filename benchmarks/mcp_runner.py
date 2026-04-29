@@ -410,8 +410,18 @@ class OfficeBenchMCPRunner:
         if pin_file and pin_file.exists():
             pinned_ids = [l.strip() for l in pin_file.read_text().splitlines() if l.strip()]
             ordered    = {t.id: t for t in tasks}
-            tasks      = [ordered[tid] for tid in pinned_ids if tid in ordered]
-            print(f"[OfficeBench] Using pinned task IDs from {pin_file}: {len(tasks)} tasks")
+            pinned     = [ordered[tid] for tid in pinned_ids if tid in ordered]
+            if len(pinned) < self.max_tasks:
+                # Expand: add new tasks not already in pin file up to max_tasks
+                pinned_set = set(pinned_ids)
+                extras = [t for t in tasks if t.id not in pinned_set]
+                pinned = (pinned + extras)[: self.max_tasks]
+                if pin_file:
+                    pin_file.write_text("\n".join(t.id for t in pinned))
+                    print(f"[OfficeBench] Expanded pin file to {len(pinned)} task IDs → {pin_file}")
+            else:
+                print(f"[OfficeBench] Using pinned task IDs from {pin_file}: {len(pinned)} tasks")
+            tasks = pinned
         else:
             tasks = tasks[: self.max_tasks]
             if pin_file and tasks:
