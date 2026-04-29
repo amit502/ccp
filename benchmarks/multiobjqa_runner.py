@@ -118,13 +118,16 @@ def _load_nq_tasks(max_tasks: int, hops: int = 3) -> List[Any]:
             all_answers = [a for t in tasks for a in t.answers]
             all_answers_filled = all(a and str(a).strip() for a in all_answers)
             has_new_goals = tasks and "Complete exactly" in tasks[0].goal
-            if tasks and all_answers_filled and has_new_goals:
+            has_enough    = len(tasks) >= max_tasks
+            if tasks and all_answers_filled and has_new_goals and has_enough:
                 print(f"[MultiObjQA] Loaded {len(tasks)} tasks from cache {_TASK_CACHE_FILE}")
                 return tasks
             if not has_new_goals:
                 reason = "old goal format"
             elif not all_answers_filled:
                 reason = "tasks contain questions with no NQ short answer"
+            elif not has_enough:
+                reason = f"only {len(tasks)} cached but {max_tasks} requested"
             else:
                 reason = "validation failed"
             print(f"[MultiObjQA] Cache invalid ({reason}) — rebuilding from source")
