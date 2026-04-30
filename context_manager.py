@@ -457,7 +457,6 @@ class CCPContextManager:
             )
             snap.tier = CompressionTier.ACTIVE
             kept.insert(0, snap)
-            n_active += 1
 
         self._context.elements = kept
 

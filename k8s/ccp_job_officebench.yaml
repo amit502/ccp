@@ -41,7 +41,7 @@ spec:
             - name: TOKEN_THRESHOLD
               value: "500"
             - name: OFFICEBENCH_TOKEN_THRESHOLD
-              value: "80"
+              value: "40"
             - name: CCP_RECENT_WINDOW
               value: "1"
             - name: CCP_MAX_ANCESTORS

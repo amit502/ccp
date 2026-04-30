@@ -39,7 +39,7 @@ spec:
             - name: TOKEN_THRESHOLD
               value: "500"
             - name: MULTIQA_TOKEN_THRESHOLD
-              value: "100"
+              value: "500"
             - name: ACON_OPT_ITERS
               value: "1"
             - name: MULTIQA_TASK_CACHE_FILE
