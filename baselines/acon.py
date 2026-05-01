@@ -527,8 +527,6 @@ def compare_ccp_vs_acon(ccp_results: List[Any], benchmark: str = "AppWorld") -> 
               f"{ccp_metrics['task_success_rate']:>12.3f}")
         print(f"{'Token Reduction %':<38} {acon_ref.token_reduction_pct:>17.1f}% "
               f"{'(computed)':>12}")
-    cr = ccp_metrics['causal_recall']
-    print(f"{'Causal Recall (novel — CCP only)':<38} {'N/A':>18} {str(cr):>12}")
     print(f"{'Offline optimization required':<38} {'Yes (5 iters)':>18} {'No':>12}")
     print(f"{'Adaptation to new task types':<38} {'Full re-run':>18} {'0 tasks':>12}")
     print(f"{'='*70}\n")

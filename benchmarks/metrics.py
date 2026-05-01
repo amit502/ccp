@@ -129,18 +129,15 @@ def compression_efficiency(results: List[TaskResult]) -> float:
 
 def compute_all_metrics(results: List[TaskResult], method: str = "") -> Dict[str, Any]:
     """
-    Compute all 5 metrics for a set of task results.
+    Compute all metrics for a set of task results.
     Returns a dict ready for printing / CSV export.
     """
-    _m = method or (results[0].method if results else "")
-    cr = causal_recall(results, method=_m)
     return {
         "method":               method or (results[0].method if results else ""),
         "n_tasks":              len(results),
         "task_success_rate":    round(task_success_rate(results), 4),
         "mean_peak_tokens":     round(mean_peak_token_usage(results), 1),
         "context_dependency":   round(context_dependency(results), 1),
-        "causal_recall":        round(cr, 4) if cr is not None else "N/A",
         "compression_efficiency": round(compression_efficiency(results), 6),
     }
 
@@ -150,7 +147,7 @@ def print_metrics_table(metrics_list: List[Dict[str, Any]]) -> None:
     if not metrics_list:
         return
 
-    header = ["Method", "Success↑", "Peak Tok↓", "CtxDep↓", "CsRecall↑", "Eff↑"]
+    header = ["Method", "Success↑", "Peak Tok↓", "CtxDep↓", "Eff↑"]
     rows = []
     for m in metrics_list:
         rows.append([
@@ -158,7 +155,6 @@ def print_metrics_table(metrics_list: List[Dict[str, Any]]) -> None:
             f"{m['task_success_rate']:.3f}",
             f"{m['mean_peak_tokens']:.0f}",
             f"{m['context_dependency']:.0f}",
-            str(m["causal_recall"]),
             f"{m['compression_efficiency']:.4f}",
         ])
 

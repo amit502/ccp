@@ -351,7 +351,6 @@ def run_ablation_online(max_tasks: int, verbose: bool):
             "task_success_rate": ref.task_success_rate,
             "mean_peak_tokens": "N/A",
             "context_dependency": "N/A",
-            "causal_recall": "N/A",
             "compression_efficiency": "N/A",
             "note": f"token_reduction={ref.token_reduction_pct}% (paper)",
         })

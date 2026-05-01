@@ -332,7 +332,7 @@ class TestMetrics(unittest.TestCase):
         required_keys = [
             "method", "n_tasks", "task_success_rate",
             "mean_peak_tokens", "context_dependency",
-            "causal_recall", "compression_efficiency",
+            "compression_efficiency",
         ]
         for k in required_keys:
             self.assertIn(k, metrics)
