@@ -1,0 +1,35 @@
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Main results across three benchmarks. $\uparrow$ higher is better, $\downarrow$ lower is better. Best per column in \textbf{bold}.}
+  \label{tab:main_results}
+  \begin{tabular}{lrrrr}
+    \toprule
+    Method & Success$\uparrow$ & Peak Tok$\downarrow$ & CtxDep$\downarrow$ & Eff$\uparrow$ \\
+    \midrule
+    \multicolumn{5}{l}{\textit{AppWorld}} \\
+    No Compression & 0.080 & 2329.9 & 2329.9 & 0.0343 \\
+    FIFO & 0.093 & 503.7 & 331.1 & 0.2818 \\
+    Token Perplexity & 0.067 & \textbf{471.7} & 384.3 & 0.1735 \\
+    Retrieval & \textbf{0.133} & 1588.3 & 1425.6 & 0.0935 \\
+    ACON & 0.093 & 952.6 & 906.0 & 0.1030 \\
+    \textbf{CCP (ours)} & 0.107 & 546.2 & \textbf{330.8} & \textbf{0.3224} \\
+    \midrule
+    \multicolumn{5}{l}{\textit{MultiQA}} \\
+    No Compression & \textbf{0.520} & 90.1 & 90.1 & \textbf{5.7718} \\
+    FIFO & 0.107 & 39.0 & 30.1 & 3.5414 \\
+    Token Perplexity & 0.160 & \textbf{37.0} & \textbf{29.3} & 5.4570 \\
+    Retrieval & 0.400 & 74.1 & 74.1 & 5.3996 \\
+    ACON & 0.093 & 82.2 & 82.2 & 1.1351 \\
+    \textbf{CCP (ours)} & 0.467 & 83.8 & 83.8 & 5.5697 \\
+    \midrule
+    \multicolumn{5}{l}{\textit{OfficeBench}} \\
+    No Compression & \textbf{0.413} & 296.2 & 296.2 & 1.3955 \\
+    FIFO & \textbf{0.413} & 157.5 & 64.0 & 6.4597 \\
+    Token Perplexity & \textbf{0.413} & \textbf{45.4} & \textbf{37.7} & \textbf{10.9773} \\
+    Retrieval & \textbf{0.413} & 249.7 & 249.1 & 1.6591 \\
+    ACON & 0.307 & 222.5 & 210.6 & 1.4559 \\
+    \textbf{CCP (ours)} & \textbf{0.413} & 149.2 & 55.8 & 7.4039 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
